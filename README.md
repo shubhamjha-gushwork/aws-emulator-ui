@@ -76,25 +76,7 @@ scripts/stop-local.sh --ui-only  # stop only the UI
 
 > **Data is in memory only.** Stopping Floci, quitting Docker Desktop or rebooting wipes its resources. Run `npm run seed` again after a restart if you want the demo data back.
 
-### 4. Point the AWS CLI / SDKs at Floci
-
-Floci is plain HTTP and accepts any non-empty keys (commonly `test` / `test`):
-
-```bash
-export AWS_ACCESS_KEY_ID=test
-export AWS_SECRET_ACCESS_KEY=test
-export AWS_DEFAULT_REGION=us-east-1
-export AWS_ENDPOINT_URL=http://127.0.0.1:4566
-# optional, so a real profile cannot leak in:
-# unset AWS_PROFILE
-# export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
-
-aws sts get-caller-identity
-```
-
-The account id is `000000000000`. `unset AWS_ENDPOINT_URL AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY` to go back to real AWS.
-
-### 5. Troubleshooting
+### 4. Troubleshooting
 
 - **UI says Floci isn't answering:** `docker ps` should show `floci` healthy, and `curl http://127.0.0.1:4566/_floci/health` should return 200. Start Docker Desktop, then `scripts/start-local.sh`.
 - **ECR `docker push` / ECS can't pull:** Floci and its registry sidecar must be on the user-defined network `floci-net`. The start script does this; don't run Floci on the default `bridge` network.
