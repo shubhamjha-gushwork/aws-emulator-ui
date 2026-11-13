@@ -5,17 +5,27 @@ import { loadYaml } from './yaml';
 
 export const PLACEHOLDER = 'PLACEHOLDER';
 
+/** Returned when a SecretBag key is not in the local env file. Not a value — never print it. */
+export const MISSING_SECRET = Symbol('MISSING_SECRET');
+
 export class SecretBag {
   readonly name: string;
   readonly source: string;
   readonly keys = new Set<string>();
-  constructor(name: string, source: string) {
+  /** Local --env-file values only (never process.env). Used so YAML defaults do not hide a present key. */
+  readonly fileEnv: NodeJS.Dict<string>;
+  constructor(name: string, source: string, fileEnv?: NodeJS.Dict<string>) {
     this.name = name;
     this.source = source;
+    this.fileEnv = fileEnv ?? {};
   }
-  get(key: string): string {
+  get(key: string): string | typeof MISSING_SECRET {
     this.keys.add(key);
-    return PLACEHOLDER;
+    if (Object.prototype.hasOwnProperty.call(this.fileEnv, key)) {
+      const v = this.fileEnv[key];
+      if (v !== undefined && v !== '') return v;
+    }
+    return MISSING_SECRET;
   }
   toJSON() {
     return { __secret: this.name, keys: [...this.keys] };
@@ -30,6 +40,10 @@ export interface InterpCtx {
   env: NodeJS.Dict<string>;
   fileBase: string;
   secrets: Map<string, SecretBag>;
+  /** Env-file values only; SecretBag reads this, not process.env. */
+  fileEnv: NodeJS.Dict<string>;
+  /** Secret keys that used a YAML default because they were missing from the env file. Names only. */
+  defaultedKeys: Set<string>;
   constructs: Record<string, Record<string, string>>;
   warnings: string[];
   visiting: Set<string>;
@@ -42,6 +56,7 @@ export function createCtx(opts: {
   root: Record<string, unknown>;
   fileBase: string;
   env?: NodeJS.Dict<string>;
+  fileEnv?: NodeJS.Dict<string>;
 }): InterpCtx {
   return {
     stage: opts.stage,
@@ -51,6 +66,8 @@ export function createCtx(opts: {
     env: opts.env ?? process.env,
     fileBase: opts.fileBase,
     secrets: new Map(),
+    fileEnv: opts.fileEnv ?? {},
+    defaultedKeys: new Set(),
     constructs: {},
     warnings: [],
     visiting: new Set(),
@@ -102,7 +119,7 @@ export function interpolateString(input: string, ctx: InterpCtx): unknown {
 }
 
 function stringify(v: unknown): string {
-  if (v instanceof SecretBag) return PLACEHOLDER;
+  if (v === MISSING_SECRET || v instanceof SecretBag) return PLACEHOLDER;
   if (typeof v === 'object') return JSON.stringify(v);
   return String(v);
 }
@@ -163,6 +180,15 @@ function resolveExpr(expr: string, ctx: InterpCtx): unknown {
   const pathStr = typeof interpolateString(rawPath, ctx) === 'string' ? (interpolateString(rawPath, ctx) as string) : rawPath;
   try {
     const v = resolvePath(pathStr, ctx);
+    // A missing secret key is unset: YAML defaults must win. Placeholders only when there is no default.
+    if (v === MISSING_SECRET || v === PLACEHOLDER || v === PLACEHOLDER_VALUE) {
+      if (def !== undefined) {
+        const key = pathStr.split('.').pop();
+        if (key) ctx.defaultedKeys.add(key);
+        return maybeInterpDefault(def, ctx);
+      }
+      return PLACEHOLDER;
+    }
     if (v === undefined || v === null || v === '') {
       if (def !== undefined) return maybeInterpDefault(def, ctx);
       if (kindOf(pathStr) === 'env') {
@@ -232,7 +258,7 @@ function resolveSsm(spec: string, ctx: InterpCtx): SecretBag {
   const name = localSecretName(ctx.stage, ref);
   let bag = ctx.secrets.get(name);
   if (!bag) {
-    bag = new SecretBag(name, spec);
+    bag = new SecretBag(name, spec, ctx.fileEnv);
     ctx.secrets.set(name, bag);
   }
   return bag;
@@ -349,14 +375,19 @@ function secretBagFromRefString(raw: string, ctx: InterpCtx): SecretBag | undefi
   const name = localSecretName(ctx.stage, leaf);
   let bag = ctx.secrets.get(name);
   if (!bag) {
-    bag = new SecretBag(name, 'secretsmanager');
+    bag = new SecretBag(name, 'secretsmanager', ctx.fileEnv);
     ctx.secrets.set(name, bag);
   }
   return bag;
 }
 
-export function collectSecrets(ctx: InterpCtx): { name: string; keys: string[]; source: string }[] {
-  return [...ctx.secrets.values()].map((b) => ({ name: b.name, keys: [...b.keys].sort(), source: b.source }));
+export function collectSecrets(ctx: InterpCtx): { name: string; keys: string[]; source: string; defaulted: string[] }[] {
+  return [...ctx.secrets.values()].map((b) => ({
+    name: b.name,
+    keys: [...b.keys].sort(),
+    source: b.source,
+    defaulted: [...b.keys].filter((k) => ctx.defaultedKeys.has(k)).sort(),
+  }));
 }
 
 export { PLACEHOLDER_VALUE };

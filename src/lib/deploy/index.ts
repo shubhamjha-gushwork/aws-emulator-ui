@@ -31,8 +31,9 @@ export function loadFileEnv(opts: Pick<DeployOptions, 'source' | 'envFile'>): { 
 
 export function annotatePlan(plan: Plan, fileEnv: EnvMap): Plan {
   for (const p of plan.placeholders) {
-    const { filled, missing } = classifyKeys(p.keys, fileEnv);
+    const { filled, defaulted, missing } = classifyKeys(p.keys, fileEnv, p.defaulted);
     p.filled = filled;
+    p.defaulted = defaulted;
     p.missing = missing;
   }
   return plan;
@@ -57,7 +58,7 @@ async function run(opts: DeployOptions, dry: boolean): Promise<RunResult> {
   for (const cfg of configs) {
     const sourceLabel = path.resolve(cfg.file);
     if (cfg.kind === 'serverless') {
-      const parsed = parseServerlessFile(cfg.file, { stage: opts.stage, region: opts.region, env });
+      const parsed = parseServerlessFile(cfg.file, { stage: opts.stage, region: opts.region, env, fileEnv: loaded.env });
       if (dry) {
         plans.push(annotatePlan(planServerless(parsed, { noRun: opts.noRun }), loaded.env));
         continue;
@@ -72,7 +73,7 @@ async function run(opts: DeployOptions, dry: boolean): Promise<RunResult> {
       }
       plans.push(annotatePlan(plan, loaded.env));
     } else {
-      const parsed = parseTrinityFile(cfg.file, { stage: opts.stage, region: opts.region, env });
+      const parsed = parseTrinityFile(cfg.file, { stage: opts.stage, region: opts.region, env, fileEnv: loaded.env });
       if (dry) {
         plans.push(annotatePlan(planTrinity(parsed, { noRun: opts.noRun }), loaded.env));
         continue;
@@ -115,10 +116,10 @@ function runSyncPlan(opts: DeployOptions): RunResult {
   const plans: Plan[] = [];
   for (const cfg of configs) {
     if (cfg.kind === 'serverless') {
-      const parsed = parseServerlessFile(cfg.file, { stage: opts.stage, region: opts.region, env });
+      const parsed = parseServerlessFile(cfg.file, { stage: opts.stage, region: opts.region, env, fileEnv: loaded.env });
       plans.push(annotatePlan(planServerless(parsed, { noRun: opts.noRun }), loaded.env));
     } else {
-      const parsed = parseTrinityFile(cfg.file, { stage: opts.stage, region: opts.region, env });
+      const parsed = parseTrinityFile(cfg.file, { stage: opts.stage, region: opts.region, env, fileEnv: loaded.env });
       plans.push(annotatePlan(planTrinity(parsed, { noRun: opts.noRun }), loaded.env));
     }
   }

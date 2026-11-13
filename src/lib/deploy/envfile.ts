@@ -92,14 +92,21 @@ export function fillPlaceholderEnv(vars: Record<string, string>, fileEnv: EnvMap
   return filled;
 }
 
-export function classifyKeys(keys: string[], fileEnv: EnvMap): { filled: string[]; missing: string[] } {
+export function classifyKeys(
+  keys: string[],
+  fileEnv: EnvMap,
+  defaultedNames?: string[],
+): { filled: string[]; defaulted: string[]; missing: string[] } {
   const filled: string[] = [];
+  const defaulted: string[] = [];
   const missing: string[] = [];
+  const defs = new Set(defaultedNames ?? []);
   for (const k of keys) {
-    if (Object.prototype.hasOwnProperty.call(fileEnv, k)) filled.push(k);
+    if (Object.prototype.hasOwnProperty.call(fileEnv, k) && fileEnv[k] !== '') filled.push(k);
+    else if (defs.has(k)) defaulted.push(k);
     else missing.push(k);
   }
-  return { filled, missing };
+  return { filled, defaulted, missing };
 }
 
 export function renderEnvExample(keys: string[]): string {

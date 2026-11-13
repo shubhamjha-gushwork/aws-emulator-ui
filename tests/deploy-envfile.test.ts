@@ -68,6 +68,16 @@ describe('fill secrets from env keys', () => {
     expect(JSON.stringify(classifyKeys(['API_TOKEN', 'DATABASE_URL'], { API_TOKEN: 'hidden-token' }))).not.toContain('hidden-token');
   });
 
+  it('classifies env-file hits, YAML-defaulted keys, and truly missing keys by name only', () => {
+    const hidden = 'hidden-token';
+    const result = classifyKeys(['API_TOKEN', 'POSTHOG_HOST', 'REDIS_URL'], { API_TOKEN: hidden }, ['POSTHOG_HOST']);
+    expect(result.filled).toEqual(['API_TOKEN']);
+    expect(result.defaulted).toEqual(['POSTHOG_HOST']);
+    expect(result.missing).toEqual(['REDIS_URL']);
+    expect(JSON.stringify(result)).not.toContain(hidden);
+  });
+
+
   it('replaces PLACEHOLDER env vars in place when keys match', () => {
     const vars = { STAGE: 'local', API_TOKEN: PLACEHOLDER, OTHER: PLACEHOLDER_VALUE };
     const filled = fillPlaceholderEnv(vars, { API_TOKEN: 'hidden-token' });

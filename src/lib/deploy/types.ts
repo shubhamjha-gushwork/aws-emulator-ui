@@ -53,7 +53,7 @@ export interface Plan {
   stage: string;
   region: string;
   resources: PlannedResource[];
-  placeholders: { name: string; keys: string[]; filled?: string[]; missing?: string[] }[];
+  placeholders: { name: string; keys: string[]; filled?: string[]; defaulted?: string[]; missing?: string[] }[];
   warnings: string[];
   unsupported: string[];
 }
@@ -78,7 +78,7 @@ export interface DeployManifest {
   createdAt: string;
   updatedAt: string;
   resources: ManifestResource[];
-  placeholders: { name: string; keys: string[]; filled?: string[]; missing?: string[] }[];
+  placeholders: { name: string; keys: string[]; filled?: string[]; defaulted?: string[]; missing?: string[] }[];
   warnings: string[];
 }
 

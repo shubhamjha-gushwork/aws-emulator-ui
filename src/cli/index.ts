@@ -88,11 +88,13 @@ function printPlan(plan: Plan) {
     console.log('  secrets (local env file only — values are never printed, never read from real AWS):');
     for (const p of plan.placeholders) {
       const filled = p.filled ?? [];
-      const missing = p.missing ?? p.keys;
+      const defaulted = p.defaulted ?? [];
+      const missing = p.missing ?? p.keys.filter((k) => !filled.includes(k) && !defaulted.includes(k));
       console.log(`    ${p.name}`);
       if (filled.length) console.log(`      from env file: ${filled.join(', ')}`);
+      if (defaulted.length) console.log(`      yaml default:   ${defaulted.join(', ')}`);
       if (missing.length) console.log(`      missing:        ${missing.join(', ')}`);
-      if (!filled.length && !missing.length && p.keys.length) console.log(`      keys: ${p.keys.join(', ')}`);
+      if (!filled.length && !defaulted.length && !missing.length && p.keys.length) console.log(`      keys: ${p.keys.join(', ')}`);
     }
   }
   for (const w of plan.warnings) console.log(`  warning  ${w}`);
@@ -162,16 +164,17 @@ async function main() {
       for (const s of p.placeholders) {
         console.log(`  ${s.name}`);
         const filled = new Set(s.filled ?? []);
+        const defaulted = new Set(s.defaulted ?? []);
         const keys = s.keys.length ? s.keys : [];
         for (const k of keys) {
-          const status = filled.has(k) ? 'present' : 'missing';
+          const status = filled.has(k) ? 'present' : defaulted.has(k) ? 'defaulted' : 'missing';
           console.log(`    ${k.padEnd(32)} ${status}`);
           if (status === 'missing') missingAll.push(k);
         }
       }
     }
     if (missingAll.length) console.log(`\nMissing keys: ${[...new Set(missingAll)].join(', ')}`);
-    else console.log('\nAll referenced keys are present in the env file.');
+    else console.log('\nAll referenced keys are present in the env file or have a YAML default.');
     if (opts['write-example']) {
       const keys = result.plans.flatMap((p) => p.placeholders.flatMap((s) => s.keys));
       const dest = typeof opts['write-example'] === 'string'

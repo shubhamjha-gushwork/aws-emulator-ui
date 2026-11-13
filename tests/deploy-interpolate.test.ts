@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { createCtx, interpolateString, interpolateTree, collectSecrets, SecretBag } from '../src/lib/deploy/interpolate';
+import { createCtx, interpolateString, interpolateTree, collectSecrets, SecretBag, PLACEHOLDER } from '../src/lib/deploy/interpolate';
 import { detectConfigs } from '../src/lib/deploy/detect';
 import { parseServerlessFile, planServerless } from '../src/lib/deploy/serverless/parse';
 import { parseTrinityFile, planTrinity } from '../src/lib/deploy/trinity/parse';
+import { annotatePlan } from '../src/lib/deploy';
 
 const fixtures = path.join(__dirname, 'fixtures');
 
@@ -76,5 +79,124 @@ describe('detect + plan fixtures', () => {
     expect(plan.resources.some((r) => r.kind === 'ecs-service')).toBe(true);
     expect(plan.resources.some((r) => r.kind === 'alb')).toBe(true);
     expect(plan.placeholders.some((p) => p.keys.includes('DATABASE_URL'))).toBe(true);
+  });
+});
+
+describe('YAML defaults vs missing secret keys', () => {
+  it('uses the YAML default when a secret key is not in the env file, and PLACEHOLDER only with no default', () => {
+    const doc: Record<string, unknown> = {
+      custom: {
+        stage: "local",
+        appSecrets: '${ssm:/aws/reference/secretsmanager/${self:custom.stage}/app-secrets}',
+      },
+      provider: {
+        environment: {
+          POSTHOG_HOST: "${self:custom.appSecrets.POSTHOG_HOST, 'https://us.posthog.com'}",
+          APEX_PROXY_IPS: "${self:custom.appSecrets.APEX_PROXY_IPS, '1.2.3.4'}",
+          API_TOKEN: '${self:custom.appSecrets.API_TOKEN}',
+          EMPTY_DEFAULT: "${self:custom.appSecrets.EMPTY_DEFAULT, ''}",
+        },
+      },
+    };
+    const c = createCtx({ stage: 'local', region: 'us-east-1', root: doc, fileBase: fixtures, fileEnv: {} });
+    interpolateTree(doc, c);
+    const env = (doc.provider as { environment: Record<string, string> }).environment;
+    expect(env.POSTHOG_HOST).toBe('https://us.posthog.com');
+    expect(env.APEX_PROXY_IPS).toBe('1.2.3.4');
+    expect(env.API_TOKEN).toBe(PLACEHOLDER);
+    expect(env.EMPTY_DEFAULT).toBe('');
+    expect(env.POSTHOG_HOST).not.toBe(PLACEHOLDER);
+    expect(c.defaultedKeys.has('POSTHOG_HOST')).toBe(true);
+    expect(c.defaultedKeys.has('APEX_PROXY_IPS')).toBe(true);
+    expect(c.defaultedKeys.has('EMPTY_DEFAULT')).toBe(true);
+    expect(c.defaultedKeys.has('API_TOKEN')).toBe(false);
+    const secrets = collectSecrets(c);
+    expect(secrets[0].keys).toEqual(['APEX_PROXY_IPS', 'API_TOKEN', 'EMPTY_DEFAULT', 'POSTHOG_HOST']);
+    expect(secrets[0].defaulted).toEqual(['APEX_PROXY_IPS', 'EMPTY_DEFAULT', 'POSTHOG_HOST']);
+    expect(JSON.stringify(secrets)).not.toContain('https://us.posthog.com');
+  });
+
+  it('lets a present env-file value win over the YAML default', () => {
+    const doc: Record<string, unknown> = {
+      custom: {
+        stage: 'local',
+        appSecrets: '${ssm:/aws/reference/secretsmanager/local/app-secrets}',
+      },
+      provider: {
+        environment: {
+          POSTHOG_HOST: "${self:custom.appSecrets.POSTHOG_HOST, 'https://us.posthog.com'}",
+          API_TOKEN: '${self:custom.appSecrets.API_TOKEN}',
+        },
+      },
+    };
+    const hidden = 'env-file-host-do-not-leak';
+    const c = createCtx({
+      stage: 'local',
+      region: 'us-east-1',
+      root: doc,
+      fileBase: fixtures,
+      fileEnv: { POSTHOG_HOST: hidden },
+    });
+    interpolateTree(doc, c);
+    const env = (doc.provider as { environment: Record<string, string> }).environment;
+    expect(env.POSTHOG_HOST).toBe(hidden);
+    expect(env.POSTHOG_HOST).not.toBe('https://us.posthog.com');
+    expect(env.API_TOKEN).toBe(PLACEHOLDER);
+    expect(c.defaultedKeys.has('POSTHOG_HOST')).toBe(false);
+    const secrets = collectSecrets(c);
+    expect(secrets[0].defaulted).toEqual([]);
+    expect(JSON.stringify(secrets)).not.toContain(hidden);
+    expect(JSON.stringify({ name: c.secrets.get('aws-emulator/local/app-secrets')?.toJSON() })).not.toContain(hidden);
+  });
+
+  it('does not treat a bare ${ssm:...} SecretBag as missing when a default is present (keeps the bag)', () => {
+    const doc: Record<string, unknown> = {
+      custom: {
+        appSecrets: "${ssm:/aws/reference/secretsmanager/local/app-secrets, 'fallback'}",
+      },
+    };
+    const c = createCtx({ stage: 'local', region: 'us-east-1', root: doc, fileBase: fixtures, fileEnv: {} });
+    interpolateTree(doc, c);
+    expect((doc.custom as { appSecrets: SecretBag }).appSecrets).toBeInstanceOf(SecretBag);
+  });
+
+  it('annotates plan keys as filled, defaulted, or missing without leaking values', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ae-def-'));
+    fs.writeFileSync(
+      path.join(dir, 'serverless.yml'),
+      `
+service: defaults-demo
+custom:
+  stage: \${opt:stage, 'dev'}
+  appSecrets: \${ssm:/aws/reference/secretsmanager/\${self:custom.stage}/app-secrets}
+provider:
+  environment:
+    POSTHOG_HOST: \${self:custom.appSecrets.POSTHOG_HOST, 'https://us.posthog.com'}
+    API_TOKEN: \${self:custom.appSecrets.API_TOKEN}
+    FROM_FILE: \${self:custom.appSecrets.FROM_FILE, 'should-not-win'}
+functions:
+  ping:
+    handler: index.handler
+`,
+    );
+    const hidden = 'file-value-do-not-leak';
+    const parsed = parseServerlessFile(path.join(dir, 'serverless.yml'), {
+      stage: 'local',
+      region: 'us-east-1',
+      fileEnv: { FROM_FILE: hidden },
+    });
+    const plan = annotatePlan(planServerless(parsed), { FROM_FILE: hidden });
+    const ph = plan.placeholders[0];
+    expect(ph.filled).toEqual(['FROM_FILE']);
+    expect(ph.defaulted).toEqual(['POSTHOG_HOST']);
+    expect(ph.missing).toEqual(['API_TOKEN']);
+    const dumped = JSON.stringify(plan.placeholders);
+    expect(dumped).not.toContain(hidden);
+    expect(dumped).not.toContain('should-not-win');
+    expect(dumped).not.toContain('https://us.posthog.com');
+    expect(parsed.environment.POSTHOG_HOST).toBe('https://us.posthog.com');
+    expect(parsed.environment.FROM_FILE).toBe(hidden);
+    expect(parsed.environment.API_TOKEN).toBe(PLACEHOLDER);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

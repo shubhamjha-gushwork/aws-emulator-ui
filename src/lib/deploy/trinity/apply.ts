@@ -15,7 +15,7 @@ import { PutRuleCommand, PutTargetsCommand } from '@aws-sdk/client-eventbridge';
 import type { DeployClients } from '../client';
 import { resourceTags } from '../client';
 import { collectSecrets } from '../interpolate';
-import { buildSecretPayload, fillPlaceholderEnv, type EnvMap } from '../envfile';
+import { buildSecretPayload, classifyKeys, fillPlaceholderEnv, type EnvMap } from '../envfile';
 import { uiHref, type DeployManifest, type ManifestResource, type Plan } from '../types';
 import { planTrinity, type ParsedTrinity, type TrinityTask } from './parse';
 import { fitFargateResources } from './fargate';
@@ -42,7 +42,8 @@ export async function applyTrinity(
     const payload = buildSecretPayload(keys, fileEnv);
     await upsertSecret(clients, s.name, payload.secretString);
     filledFromEnv.push(...payload.filled);
-    if (payload.missing.length) stillMissing.push({ name: s.name, keys: payload.missing });
+    const classified = classifyKeys(keys, fileEnv, s.defaulted);
+    if (classified.missing.length) stillMissing.push({ name: s.name, keys: classified.missing });
     resources.push({ kind: 'secret', name: s.name, href: uiHref('secret') });
   }
 

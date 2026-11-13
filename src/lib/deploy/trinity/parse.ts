@@ -70,7 +70,7 @@ function strEnv(v: unknown): Record<string, string> {
  * shapes observed in trinity.yml / *.trinity.yml files:
  *   name, account, region, environment.{refs,variables}, custom.{stage}, stacks.{HTTPApi|Fargate|ScheduledFargate}
  */
-export function parseTrinityFile(file: string, opts: { stage: string; region: string; accountId?: string; env?: NodeJS.Dict<string> }): ParsedTrinity {
+export function parseTrinityFile(file: string, opts: { stage: string; region: string; accountId?: string; env?: NodeJS.Dict<string>; fileEnv?: NodeJS.Dict<string> }): ParsedTrinity {
   const raw = fs.readFileSync(file, 'utf8');
   const doc = rec(loadYaml(raw));
   const root = path.dirname(file);
@@ -82,7 +82,7 @@ export function parseTrinityFile(file: string, opts: { stage: string; region: st
   custom.stage = opts.stage;
   doc.custom = custom;
 
-  const ctx = createCtx({ stage: opts.stage, region: opts.region, accountId: opts.accountId, root: doc, fileBase: root, env: opts.env });
+  const ctx = createCtx({ stage: opts.stage, region: opts.region, accountId: opts.accountId, root: doc, fileBase: root, env: opts.env, fileEnv: opts.fileEnv });
   if (doc.custom) interpolateTree(doc.custom, ctx);
   const refs = rec(rec(doc.environment).refs);
   interpolateTree(refs, ctx);
@@ -186,7 +186,7 @@ export function planTrinity(parsed: ParsedTrinity, opts: { noRun?: boolean } = {
     stage: parsed.stage,
     region: parsed.region,
     resources,
-    placeholders: collectSecrets(parsed.ctx).map((s) => ({ name: s.name, keys: s.keys })),
+    placeholders: collectSecrets(parsed.ctx).map((s) => ({ name: s.name, keys: s.keys, defaulted: s.defaulted })),
     warnings: parsed.warnings,
     unsupported: parsed.unsupported,
   };
