@@ -281,7 +281,8 @@ function loadFile(rel: string, subpath: string | undefined, ctx: InterpCtx): unk
     if (/\.ya?ml$/i.test(file)) doc = loadYaml(raw);
     else if (/\.json$/i.test(file)) doc = JSON.parse(raw);
     else doc = raw;
-    const child: InterpCtx = { ...ctx, fileBase: path.dirname(file), root: (doc && typeof doc === 'object' ? (doc as Record<string, unknown>) : ctx.root) };
+    // ${self:} always refers to the service document, not the included file (Serverless Framework behavior).
+    const child: InterpCtx = { ...ctx, fileBase: path.dirname(file) };
     const walked = interpolateTree(doc, child);
     // merge secret bags
     for (const [k, v] of child.secrets) ctx.secrets.set(k, v);

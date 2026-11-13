@@ -21,7 +21,7 @@ import { CreateStateMachineCommand, ListStateMachinesCommand, UpdateStateMachine
 import type { DeployClients } from '../client';
 import { resourceTags } from '../client';
 import { PLACEHOLDER_VALUE, uiHref, type DeployManifest, type ManifestResource, type Plan } from '../types';
-import { collectSecrets } from '../interpolate';
+import { collectSecrets, resolveConstructTokens } from '../interpolate';
 import { buildSecretPayload, classifyKeys, fillPlaceholderEnv, type EnvMap } from '../envfile';
 import { triggerEnabled, triggerState } from '../run-mode';
 import { packageFunction } from './package';
@@ -77,6 +77,7 @@ export async function applyServerless(
     logical[q.name] = queue;
     parsed.ctx.constructs[q.name] = { queueUrl: queue.url, queueArn: queue.arn, dlqArn: dlq.arn, dlqUrl: dlq.url };
     resources.push({ kind: 'sqs', name: q.queueName, arn: queue.arn, url: queue.url, href: uiHref('sqs') });
+    resources.push({ kind: 'sqs', name: dlqName, arn: dlq.arn, url: dlq.url, href: uiHref('sqs') });
     if (q.worker.handler) {
       const workerFn: SlsFunction = {
         name: `${q.name}Worker`,
@@ -91,6 +92,13 @@ export async function applyServerless(
       };
       parsed.functions.push(workerFn);
     }
+  }
+
+  // Lift queue URLs/ARNs are known now; rewrite leftover __CONSTRUCT__ tokens in events and env.
+  resolveConstructTokens(parsed.functions, parsed.ctx);
+  resolveConstructTokens(parsed.environment, parsed.ctx);
+  for (const fn of parsed.functions) {
+    if (fn.environment) resolveConstructTokens(fn.environment, parsed.ctx);
   }
 
   // 4. Lambdas
@@ -444,14 +452,21 @@ function resolveArn(expr: unknown, logical: Record<string, { arn?: string; url?:
   return undefined;
 }
 
-function rewriteSfn(def: unknown, fnArns: Record<string, string>, logical: Record<string, { arn?: string }>): unknown {
+export function rewriteSfn(def: unknown, fnArns: Record<string, string>, logical: Record<string, { arn?: string }>): unknown {
+  const resolveFn = (id: string): string | undefined => fnArns[id] || fnArns[`${id}LambdaFunction`] || logical[id]?.arn || logical[`${id}LambdaFunction`]?.arn;
   const walk = (v: unknown): unknown => {
     if (typeof v === 'string') {
-      for (const [k, arn] of Object.entries(fnArns)) {
-        if (v.includes(k) && (v.includes('LambdaFunction') || v === k)) return arn;
+      // Only rewrite resource-like strings (Name.Arn / NameLambdaFunction). Never rewrite
+      // StartAt/Next/Default state names even when they match a function key.
+      const att = v.match(/^([A-Za-z0-9_]+)\.(Arn|ARN)$/);
+      if (att) {
+        const arn = resolveFn(att[1]);
+        if (arn) return arn;
       }
-      const m = v.match(/^([A-Za-z0-9]+)\.Arn$/);
-      if (m && logical[m[1]]?.arn) return logical[m[1]].arn;
+      if (v.endsWith('LambdaFunction')) {
+        const arn = resolveFn(v) || resolveFn(v.replace(/LambdaFunction$/, ''));
+        if (arn) return arn;
+      }
       return v;
     }
     if (Array.isArray(v)) return v.map(walk);
@@ -459,9 +474,12 @@ function rewriteSfn(def: unknown, fnArns: Record<string, string>, logical: Recor
       const o = v as Record<string, unknown>;
       if (o['Fn::GetAtt'] && Array.isArray(o['Fn::GetAtt'])) {
         const id = String(o['Fn::GetAtt'][0]);
-        return fnArns[id] || logical[id]?.arn || v;
+        return resolveFn(id) || v;
       }
-      if (typeof o.Ref === 'string' && (fnArns[o.Ref] || logical[o.Ref]?.arn)) return fnArns[o.Ref] || logical[o.Ref]?.arn;
+      if (typeof o.Ref === 'string') {
+        const arn = resolveFn(o.Ref);
+        if (arn) return arn;
+      }
       const out: Record<string, unknown> = {};
       for (const [k, val] of Object.entries(o)) out[k] = walk(val);
       return out;

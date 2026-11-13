@@ -142,7 +142,7 @@ export async function applyTrinity(
             tags: Object.entries(tags).map(([key, value]) => ({ key, value })),
           }));
         }
-        resources.push({ kind: 'ecs-service', name: serviceName, href: uiHref('ecs-service') });
+        resources.push({ kind: 'ecs-service', name: serviceName, extra: { cluster }, href: uiHref('ecs-service') });
       }
     }
   }

@@ -9,7 +9,7 @@ import { DeleteRuleCommand, RemoveTargetsCommand, ListTargetsByRuleCommand } fro
 import { DeleteRestApiCommand } from '@aws-sdk/client-api-gateway';
 import { DeleteApiCommand } from '@aws-sdk/client-apigatewayv2';
 import { DeleteStateMachineCommand } from '@aws-sdk/client-sfn';
-import { DeleteClusterCommand, DeleteServiceCommand, UpdateServiceCommand, ListTasksCommand, StopTaskCommand } from '@aws-sdk/client-ecs';
+import { DeleteClusterCommand, DeleteServiceCommand, UpdateServiceCommand, ListTasksCommand, ListServicesCommand, StopTaskCommand } from '@aws-sdk/client-ecs';
 import { DeleteRepositoryCommand } from '@aws-sdk/client-ecr';
 import { DeleteLoadBalancerCommand, DeleteTargetGroupCommand, DeleteListenerCommand, DescribeListenersCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
 import type { DeployClients } from './client';
@@ -27,18 +27,20 @@ export async function destroyManifest(clients: DeployClients, manifest: DeployMa
   ];
   const rank = (k: string) => { const i = order.indexOf(k as ManifestResource['kind']); return i < 0 ? 99 : i; };
   const resources = [...manifest.resources].sort((a, b) => rank(a.kind) - rank(b.kind));
+  const fallbackCluster = manifest.resources.find((r) => r.kind === 'ecs-cluster')?.name;
   for (const r of resources) {
     try {
-      await destroyOne(clients, r);
+      await destroyOne(clients, r, fallbackCluster);
       ok.push(`${r.kind}:${r.name}`);
     } catch (e) {
-      failed.push({ name: `${r.kind}:${r.name}`, error: (e as Error).message });
+      if (isAlreadyGone(e)) ok.push(`${r.kind}:${r.name}`);
+      else failed.push({ name: `${r.kind}:${r.name}`, error: (e as Error).message });
     }
   }
   return { ok, failed };
 }
 
-async function destroyOne(c: DeployClients, r: ManifestResource) {
+async function destroyOne(c: DeployClients, r: ManifestResource, fallbackCluster?: string) {
   switch (r.kind) {
     case 'lambda':
       await c.lambda.send(new DeleteFunctionCommand({ FunctionName: r.name }));
@@ -87,15 +89,12 @@ async function destroyOne(c: DeployClients, r: ManifestResource) {
       if (r.arn) await c.sfn.send(new DeleteStateMachineCommand({ stateMachineArn: r.arn }));
       break;
     case 'ecs-service': {
-      const cluster = clusterFrom(r);
-      await c.ecs.send(new UpdateServiceCommand({ cluster, service: r.name, desiredCount: 0 })).catch(() => undefined);
-      const tasks = await c.ecs.send(new ListTasksCommand({ cluster, serviceName: r.name })).catch(() => undefined);
-      for (const t of tasks?.taskArns ?? []) await c.ecs.send(new StopTaskCommand({ cluster, task: t, reason: 'aws-emulator destroy' })).catch(() => undefined);
-      await c.ecs.send(new DeleteServiceCommand({ cluster, service: r.name, force: true }));
+      const cluster = clusterFrom(r, fallbackCluster);
+      await drainService(c, cluster, r.name);
       break;
     }
     case 'ecs-cluster':
-      await c.ecs.send(new DeleteClusterCommand({ cluster: r.name }));
+      await drainCluster(c, r.name);
       break;
     case 'ecr':
       await c.ecr.send(new DeleteRepositoryCommand({ repositoryName: r.name, force: true }));
@@ -118,8 +117,39 @@ async function destroyOne(c: DeployClients, r: ManifestResource) {
   }
 }
 
-function clusterFrom(r: ManifestResource): string {
-  return r.extra?.cluster || r.id || r.name;
+export function clusterFrom(r: ManifestResource, fallbackCluster?: string): string {
+  return r.extra?.cluster || fallbackCluster || r.id || r.name;
+}
+
+/** Floci/AWS errors that mean the resource is already gone — treat as success so destroy is idempotent. */
+export function isAlreadyGone(err: unknown): boolean {
+  const e = err as { name?: string; Code?: string; message?: string };
+  const text = `${e.name ?? ''} ${e.Code ?? ''} ${e.message ?? ''}`;
+  return /not found|does not exist|ResourceNotFound|ClusterNotFound|ServiceNotFound|Invalid API id|NoSuch|QueueDoesNotExist|EntityAlreadyDeleted|SecretNotFound|Couldn't find|cannot be found/i.test(text);
+}
+
+async function drainService(c: DeployClients, cluster: string, service: string) {
+  await c.ecs.send(new UpdateServiceCommand({ cluster, service, desiredCount: 0 })).catch(() => undefined);
+  const tasks = await c.ecs.send(new ListTasksCommand({ cluster, serviceName: service })).catch(() => undefined);
+  for (const t of tasks?.taskArns ?? []) {
+    await c.ecs.send(new StopTaskCommand({ cluster, task: t, reason: 'aws-emulator destroy' })).catch(() => undefined);
+  }
+  await c.ecs.send(new DeleteServiceCommand({ cluster, service, force: true }));
+}
+
+async function drainCluster(c: DeployClients, cluster: string) {
+  const listed = await c.ecs.send(new ListServicesCommand({ cluster })).catch(() => undefined);
+  for (const arn of listed?.serviceArns ?? []) {
+    const name = arn.split('/').pop() || arn;
+    await drainService(c, cluster, name).catch((e) => {
+      if (!isAlreadyGone(e)) throw e;
+    });
+  }
+  const tasks = await c.ecs.send(new ListTasksCommand({ cluster })).catch(() => undefined);
+  for (const t of tasks?.taskArns ?? []) {
+    await c.ecs.send(new StopTaskCommand({ cluster, task: t, reason: 'aws-emulator destroy' })).catch(() => undefined);
+  }
+  await c.ecs.send(new DeleteClusterCommand({ cluster }));
 }
 
 
