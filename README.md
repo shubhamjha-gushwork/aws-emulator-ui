@@ -54,7 +54,7 @@ If Floci answers `NotImplemented` for something, the UI shows an orange
 ### 2. Clone and start
 
 ```bash
-git clone git@github.com:shubhamjha-gushwork/aws-emulator-ui.git
+git clone https://github.com/shubhamjha-gushwork/aws-emulator-ui.git
 cd aws-emulator-ui
 scripts/start-local.sh --seed
 ```
@@ -99,6 +99,22 @@ npx aws-emulator plan /path/to/service
 npx aws-emulator list
 npx aws-emulator destroy /path/to/service          # or a deployment id from `list`
 ```
+
+### Use the CLI from any folder
+
+Run `npm link` once in this repo to put `aws-emulator` on your PATH. Then deploy from inside any service repo:
+
+```bash
+cd aws-emulator-ui && npm ci && npm link   # once
+cd ~/code/my-service
+aws-emulator plan .                        # preview, creates nothing
+aws-emulator deploy .                      # uses ./.env.local or ./.env for secrets
+aws-emulator destroy .
+
+npm unlink -g aws-emulator                 # remove the global command
+```
+
+Paths, `.env` lookup and `--env-file` are resolved from the folder you run it in; the endpoint and region come from the UI settings (default `http://127.0.0.1:4566`, `us-east-1`).
 
 Options: `--stage` (default `local`), `--region` (default `us-east-1` or the UI setting), `--endpoint`, `--dry-run`, `--no-build` (skip Docker build/push for Trinity), `--no-run` (create only: EventBridge/Scheduler rules are DISABLED, SQS/stream mappings are disabled, S3 notifications are skipped, ECS `desiredCount` is 0), `--desired-count N`, `--kind serverless|trinity`, `--env-file <path>`.
 

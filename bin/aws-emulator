@@ -1,3 +1,26 @@
-#!/usr/bin/env bash
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-exec "$ROOT/node_modules/.bin/tsx" "$ROOT/src/cli/index.ts" "$@"
+#!/usr/bin/env node
+// Launcher for the aws-emulator CLI. Works from any folder and through `npm link`
+// symlinks: every path is resolved relative to this package, never the cwd.
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
+
+const root = path.resolve(path.dirname(fs.realpathSync(__filename)), '..');
+const tsxCli = path.join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+if (!fs.existsSync(tsxCli)) {
+  console.error(`aws-emulator: dependencies are not installed. Run \`npm ci\` in ${root} first.`);
+  process.exit(1);
+}
+const env = {
+  ...process.env,
+  TSX_TSCONFIG_PATH: process.env.TSX_TSCONFIG_PATH || path.join(root, 'tsconfig.json'),
+  // Share the UI's saved endpoint/region (<package>/.data/settings.json) regardless of cwd.
+  AWS_EMULATOR_UI_DATA_DIR: process.env.AWS_EMULATOR_UI_DATA_DIR || path.join(root, '.data'),
+};
+const r = spawnSync(process.execPath, [tsxCli, path.join(root, 'src', 'cli', 'index.ts'), ...process.argv.slice(2)], { stdio: 'inherit', env });
+if (r.error) {
+  console.error(`aws-emulator: ${r.error.message}`);
+  process.exit(1);
+}
+process.exit(r.status ?? 1);
