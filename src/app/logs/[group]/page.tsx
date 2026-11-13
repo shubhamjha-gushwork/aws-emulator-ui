@@ -4,6 +4,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { LuPause, LuPlay, LuSearch, LuSend, LuTrash2, LuX } from 'react-icons/lu';
 import { ListCard } from '@/components/ListCard';
+import { LogEventList } from '@/components/LogEvents';
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, InlineError } from '@/components/states';
 import { Button, ConfirmDialog, Input, Mono, Pill, Segmented, Select, TimeAgo, useInterval } from '@/components/ui';
@@ -13,7 +14,7 @@ import type { ApiError } from '@/lib/errors';
 import { isUiCapturedStream, logSource } from '@/lib/log-sources';
 
 interface Stream { logStreamName: string; lastEventTimestamp?: number; creationTime?: number }
-interface Ev { timestamp?: number; message?: string; logStreamName?: string; eventId?: string }
+interface Ev { timestamp?: number; message?: string; logStreamName?: string; eventId?: string; ingestionTime?: number }
 
 function decodeGroup(raw: string | string[] | undefined) {
   const v = Array.isArray(raw) ? raw.join('/') : raw ?? '';
@@ -181,15 +182,7 @@ function GroupDetail({ group, onDeleted }: { group: string; onDeleted: () => voi
             {q.error ? <ErrorState error={q.error} compact what="FilterLogEvents" /> : err ? <InlineError error={err} /> : null}
             {!q.error && base ? (
               events.length ? (
-                <div ref={listRef} className="max-h-[520px] overflow-auto rounded-lg border border-neutral-100 bg-neutral-25 font-mono text-[12.5px]" data-testid="log-events">
-                  {events.map((e, i) => (
-                    <div key={e.eventId ?? i} className="flex gap-3 border-b border-neutral-100 px-3 py-1.5 last:border-0">
-                      <span className="shrink-0 text-neutral-500" title={e.timestamp ? new Date(e.timestamp).toISOString() : undefined}>{e.timestamp ? formatTs(e.timestamp) : ''}</span>
-                      {!stream && e.logStreamName ? <span className="max-w-56 shrink-0 truncate text-primary-500" title={e.logStreamName}>{e.logStreamName}</span> : null}
-                      <span className="whitespace-pre-wrap break-all text-neutral-800">{e.message}</span>
-                    </div>
-                  ))}
-                </div>
+                <LogEventList events={events} hideStreamInRow={!!stream} listRef={listRef} />
               ) : (
                 <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed border-neutral-200 px-4 py-3 text-sm text-neutral-500" data-testid="log-empty">
                   <span>
@@ -210,13 +203,6 @@ function GroupDetail({ group, onDeleted }: { group: string; onDeleted: () => voi
       <ConfirmDialog open={confirm} onClose={() => setConfirm(false)} title={`Delete ${group}?`} description="All streams and events in the group are deleted." busy={m.busy} onConfirm={async () => { if (await m.run('logs', 'deleteGroup', { name: group }, `Deleted ${group}`)) { setConfirm(false); onDeleted(); } }} />
     </ListCard>
   );
-}
-
-function formatTs(ms: number) {
-  const d = new Date(ms);
-  const sameDay = d.toDateString() === new Date().toDateString();
-  const time = d.toLocaleTimeString([], { hour12: false });
-  return sameDay ? time : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`;
 }
 
 /** Small popover for writing a test event (stream aws-emulator-ui). */
