@@ -6,7 +6,7 @@ describe('destroy cluster lookup', () => {
     expect(clusterFrom({ kind: 'ecs-service', name: 'web-svc', extra: { cluster: 'sample-proxy-local' } })).toBe(
       'sample-proxy-local',
     );
-    expect(clusterFrom({ kind: 'ecs-service', name: 'argus-ui' }, 'argus-ui-local')).toBe('argus-ui-local');
+    expect(clusterFrom({ kind: 'ecs-service', name: 'web-ui' }, 'web-ui-local')).toBe('web-ui-local');
     expect(clusterFrom({ kind: 'ecs-service', name: 'sample-web' })).toBe('sample-web');
   });
 });

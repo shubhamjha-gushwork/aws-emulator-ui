@@ -204,7 +204,7 @@ functions:
 describe('file() includes', () => {
   it('resolves ${self:} in an included file against the service document, not the include', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ae-file-'));
-    fs.writeFileSync(path.join(dir, 'sm.yml'), 'name: stormbreaker-create-project-${self:custom.stage}\ndefinition:\n  StartAt: A\n  States: {}\n');
+    fs.writeFileSync(path.join(dir, 'sm.yml'), 'name: orders-create-project-${self:custom.stage}\ndefinition:\n  StartAt: A\n  States: {}\n');
     const doc: Record<string, unknown> = {
       custom: { stage: '${opt:stage, \'dev\'}' },
       stepFunctions: { stateMachines: { CreateProject: '${file(sm.yml)}' } },
@@ -212,7 +212,7 @@ describe('file() includes', () => {
     const c = createCtx({ stage: 'local', region: 'us-east-1', root: doc, fileBase: dir });
     interpolateTree(doc, c);
     const sm = (doc.stepFunctions as { stateMachines: { CreateProject: { name: string } } }).stateMachines.CreateProject;
-    expect(sm.name).toBe('stormbreaker-create-project-local');
+    expect(sm.name).toBe('orders-create-project-local');
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });

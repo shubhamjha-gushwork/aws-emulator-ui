@@ -30,7 +30,7 @@ describe('package.patterns', () => {
     expect(matchesPackagePatterns('utils/y.py', patterns)).toBe(true);
     expect(matchesPackagePatterns('tests/test_x.py', patterns)).toBe(false);
     expect(matchesPackagePatterns('requirements.txt', patterns)).toBe(false);
-    expect(matchesPackagePatterns('gushwork/huge.bin', patterns)).toBe(false);
+    expect(matchesPackagePatterns('vendored/huge.bin', patterns)).toBe(false);
     expect(matchesPackagePatterns('cf-workers/src.js', patterns)).toBe(false);
   });
 
@@ -46,13 +46,13 @@ describe('package.patterns', () => {
     fs.mkdirSync(path.join(root, 'utils'), { recursive: true });
     fs.mkdirSync(path.join(root, 'tests'), { recursive: true });
     fs.mkdirSync(path.join(root, 'node_modules', 'x'), { recursive: true });
-    fs.mkdirSync(path.join(root, 'gushwork'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'vendored'), { recursive: true });
     fs.writeFileSync(path.join(root, 'handlers', 'binding', 'create.py'), '#');
     fs.writeFileSync(path.join(root, 'services', 'x.py'), '#');
     fs.writeFileSync(path.join(root, 'utils', 'y.py'), '#');
     fs.writeFileSync(path.join(root, 'tests', 'test_x.py'), '#');
     fs.writeFileSync(path.join(root, 'node_modules', 'x', 'index.js'), '#');
-    fs.writeFileSync(path.join(root, 'gushwork', 'huge.bin'), '#');
+    fs.writeFileSync(path.join(root, 'vendored', 'huge.bin'), '#');
     fs.writeFileSync(path.join(root, 'requirements.txt'), 'foo');
 
     const files = selectPackageFiles(root, {
