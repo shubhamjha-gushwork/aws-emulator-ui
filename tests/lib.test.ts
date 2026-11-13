@@ -6,7 +6,7 @@ import { sanitizeSettings, DEFAULT_SETTINGS, endpointPort } from '@/lib/settings
 import { toItem } from '@/lib/services/dynamodb';
 import { str, num, strList, json, InputError } from '@/lib/services/types';
 import { awsReplacer, stripMetadata } from '@/lib/serialize';
-import { SERVICES, FIDELITY } from '@/lib/catalog';
+import { SERVICES } from '@/lib/catalog';
 import { services } from '@/lib/services';
 
 describe('trimEpochPrecision', () => {
@@ -87,11 +87,10 @@ describe('serialization', () => {
 });
 
 describe('catalog', () => {
-  it('covers the 13 v1 services, each with a backend module and fidelity score', () => {
+  it('covers the 13 v1 services, each with a backend module', () => {
     expect(SERVICES).toHaveLength(13);
     for (const s of SERVICES) {
       expect(services[s.id], s.id).toBeDefined();
-      for (const f of s.fidelityKeys) expect(FIDELITY.scores[f.key]?.total, f.key).toBeGreaterThan(0);
     }
   });
 });

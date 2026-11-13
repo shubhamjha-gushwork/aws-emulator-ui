@@ -5,9 +5,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { LuActivity, LuArrowUpRight, LuGauge, LuKeyRound, LuRefreshCw, LuServer } from 'react-icons/lu';
 import { useStatus } from '@/components/AppShell';
 import { SERVICE_ICONS } from '@/components/icons';
-import { FidelityPills, fidelityTone } from '@/components/PageHeader';
 import { Button, Card, Pill, TimeAgo } from '@/components/ui';
-import { FIDELITY, SERVICES } from '@/lib/catalog';
+import { SERVICES } from '@/lib/catalog';
 import { cn } from '@/lib/cn';
 
 type Overview = Record<string, { counts: { label: string; value: number }[]; ms: number }>;
@@ -119,7 +118,7 @@ export default function OverviewPage() {
                 </div>
                 <div className="mt-auto flex items-end justify-between gap-3 px-5 pb-4 pt-4">
                   <div className="flex gap-6">
-                    {(o?.counts ?? s.fidelityKeys.map(() => ({ label: '…', value: NaN }))).map((c, i) => (
+                    {(o?.counts ?? [{ label: '…', value: NaN }]).map((c, i) => (
                       <div key={`${c.label}-${i}`}>
                         <div className="font-grotesk text-[26px] font-semibold leading-none text-neutral-900">
                           {Number.isNaN(c.value) ? '…' : c.value < 0 ? '—' : c.value}
@@ -128,9 +127,6 @@ export default function OverviewPage() {
                       </div>
                     ))}
                   </div>
-                  <div className="flex flex-col items-end gap-1">
-                    <FidelityPills serviceId={s.id} />
-                  </div>
                 </div>
               </Card>
             </Link>
@@ -138,29 +134,6 @@ export default function OverviewPage() {
         })}
       </div>
 
-      <Card>
-        <div className="flex flex-col gap-0.5 px-5 py-3">
-          <div className="font-grotesk text-lg font-medium text-neutral-900">How closely the emulator matches AWS</div>
-          <div className="text-[13px] text-neutral-500">
-            Share of AWS&apos;s published fidelity checks that pass, release {FIDELITY.release} (scored <TimeAgo value={FIDELITY.scoredAt} />). Lower scores mean more gaps.
-          </div>
-        </div>
-        <div className="border-t border-neutral-100" />
-        <div className="grid grid-cols-1 gap-x-10 gap-y-3 px-5 py-4 md:grid-cols-2">
-          {SERVICES.flatMap((s) => s.fidelityKeys.map((f) => ({ s, f, score: FIDELITY.scores[f.key] })))
-            .sort((a, b) => (b.score?.pct ?? 0) - (a.score?.pct ?? 0))
-            .map(({ s, f, score }) => (
-              <div key={f.key} className="flex items-center gap-3">
-                <div className="w-40 shrink-0 truncate text-sm text-neutral-800">{s.fidelityKeys.length > 1 ? `${s.short} · ${f.label}` : s.short}</div>
-                <div className="h-2 flex-1 overflow-hidden rounded-full bg-neutral-50">
-                  <div className="h-full rounded-full bg-primary-500" style={{ width: `${score?.pct ?? 0}%` }} />
-                </div>
-                <Pill tone={fidelityTone(score?.pct)} className="w-14 justify-center">{score?.pct ?? '—'}%</Pill>
-                <span className="w-20 text-right text-xs text-neutral-500">{score ? `${score.pass}/${score.total}` : ''}</span>
-              </div>
-            ))}
-        </div>
-      </Card>
     </div>
   );
 }

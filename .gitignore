@@ -4,3 +4,7 @@ node_modules
 next-env.d.ts
 *.tsbuildinfo
 test-results
+.env*
+*.pem
+*.p12
+emulator_credentials
