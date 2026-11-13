@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useSelection } from '@/components/selection';
 import { LuPencil, LuPlay, LuPlus, LuSquare, LuTrash2 } from 'react-icons/lu';
 import { StateGraph } from '@/components/StateGraph';
 import { useStatus } from '@/components/AppShell';
@@ -86,18 +87,18 @@ const tpl = (key: string, region: string) => JSON.stringify(TEMPLATES[key].def(r
 
 export default function StepFunctionsPage() {
   const list = useAws<SM[]>('stepfunctions', 'list');
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useSelection('machine');
   const [creating, setCreating] = useState(false);
   const selected = list.data?.find((s) => s.stateMachineArn === sel) ?? null;
   return (
     <>
-      <PageHeader serviceId="stepfunctions" actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create state machine</Button>} />
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.3fr)]">
+      <PageHeader serviceId="stepfunctions" detail={sel ? { name: selected?.name ?? sel.split(':').pop()!, onBack: () => setSel(null) } : undefined} actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create state machine</Button>} />
+      <div className="flex flex-col gap-6">
+        {!sel ? (
         <ListCard title="State machines" subtitle={list.data ? `${list.data.length} total` : undefined} loading={list.loading} error={list.error} onReload={list.reload} hasData={!!list.data} what="ListStateMachines">
           <DataTable
             rows={list.data ?? []}
             rowKey={(s) => s.stateMachineArn}
-            selectedKey={sel}
             onRowClick={(s) => setSel(s.stateMachineArn)}
             empty="No state machines yet."
             columns={[
@@ -107,9 +108,8 @@ export default function StepFunctionsPage() {
             ]}
           />
         </ListCard>
-        {selected ? <MachineDetail key={selected.stateMachineArn} sm={selected} onDeleted={() => { setSel(null); void list.reload(); }} /> : (
-          <ListCard title="State machine details"><Empty>Select a state machine to run it and inspect executions.</Empty></ListCard>
-        )}
+        ) : null}
+        {selected ? <MachineDetail key={selected.stateMachineArn} sm={selected} onDeleted={() => { setSel(null); void list.reload(); }} /> : sel && list.data ? <ListCard title="State machine details"><Empty>Not found in this region. It may have been deleted.</Empty></ListCard> : null}
       </div>
       <CreateMachine open={creating} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void list.reload(); }} />
     </>

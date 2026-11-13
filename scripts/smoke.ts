@@ -129,6 +129,13 @@ async function main() {
   await check('logs', 'put event', () => call('logs', 'putEvent', { group: g, message: 'ERROR boom' }));
   await check('logs', 'streams', () => call('logs', 'streams', { group: g }));
   await check('logs', 'tail events', async () => { const r = await call<{ events: unknown[] }>('logs', 'events', { group: g, stream: 'aws-emulator-ui' }); if (!r.events.length) throw new Error('no events'); });
+  await check('logs', 'log group view: filter + stream + time range in one query', async () => {
+    await call('logs', 'putEvent', { group: g, message: 'INFO fine' });
+    const all = await call<{ events: { message: string }[] }>('logs', 'query', { group: g });
+    const errs = await call<{ events: { message: string }[] }>('logs', 'query', { group: g, pattern: 'ERROR', stream: 'aws-emulator-ui', startTime: Date.now() - 15 * 60_000 });
+    const none = await call<{ events: unknown[] }>('logs', 'query', { group: g, stream: 'no-such-stream' }).catch(() => ({ events: [] }));
+    if (all.events.length < 2 || errs.events.length !== 1 || !errs.events[0].message.includes('ERROR') || none.events.length) throw new Error(JSON.stringify({ all: all.events.length, errs: errs.events.length, none: none.events.length }));
+  });
   await check('logs', 'filter events', async () => { const r = await call<unknown[]>('logs', 'filter', { group: g, pattern: 'ERROR' }); if (!r.length) throw new Error('no matches'); });
   await check('logs', 'delete group', () => call('logs', 'deleteGroup', { name: g }));
 

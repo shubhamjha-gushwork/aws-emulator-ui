@@ -1,4 +1,4 @@
-# AWS Emulator UI
+# AWS Emulator
 
 A local web console for [Amazon's AWS Emulator](https://github.com/aws/aws-emulator)
 ([docs](https://docs.aws.amazon.com/emulator/latest/userguide/what-is-service.html)), styled with the
@@ -179,8 +179,8 @@ dummy keys (fine for `--auth off`).
 **Region:** pick it from the region menu in the top bar, as in the AWS console. It lists Asia Pacific (Mumbai)
 `ap-south-1`, Asia Pacific (Singapore) `ap-southeast-1`, US East (N. Virginia) `us-east-1`, US East (Ohio)
 `us-east-2`, US West (Oregon) `us-west-2`, Europe (Ireland) `eu-west-1` and Europe (Frankfurt) `eu-central-1`
-(edit `src/lib/regions.ts` to change the list). Choosing one saves it and reloads every page's data.
-Settings uses the same selector, plus the endpoint and TLS verification. They're saved to
+(edit `src/lib/regions.ts` to change the list). Choosing one saves it and reloads every page's data. That menu is the only place to change the region.
+**Settings** holds the endpoint and TLS verification. Both are saved, with the region, to
 `.data/settings.json` (mode 600, git-ignored). Environment overrides:
 
 | Variable | Purpose |
@@ -197,10 +197,17 @@ Settings uses the same selector, plus the endpoint and TLS verification. They're
 | `npm run seed` | Idempotently creates `demo-*` resources in all 13 services (functions, queues, topics with a working SNS→SQS subscription, buckets/objects, secrets, rules/schedules, a state machine plus an execution, tables/items, an ECS cluster/service/task, an ALB plus a target group, REST and HTTP APIs, ECR repos with an image). |
 | `npm run smoke` | User test of every service through the UI's own HTTP API, in the region selected in the UI, with `uitest-*` resources that it deletes afterwards (demo data is untouched): Lambda create/invoke/logs, SQS, SNS→SQS delivery, S3, Secrets, EventBridge rule→SQS delivery, Scheduler, Step Functions, Logs, DynamoDB, ECS task definition→run task→container output in CloudWatch→service, API Gateway REST (MOCK) and HTTP (→Lambda) invokes, ELB, ECR. Results go to `.data/smoke-results.json`. |
 | `npm run sfn-deep` | Step Functions deep test: Pass, Task (`lambda:invoke` and direct ARN), Choice, Wait, Parallel, Map, Succeed, Fail, Retry+Catch, SQS/SNS/DynamoDB integrations, history, stop, update, delete, EXPRESS sync runs. Results go to `.data/sfn-deep-<region>.json`. |
+| `npm run ecr-push -- <image> <repo>:<tag>` | Pushes a local Docker image to the emulator's ECR through the ECR API (`docker push` isn't supported by the emulator). |
 | `npm run logs-probe` | Evidence of what writes to CloudWatch Logs on its own (Lambda with and without log permissions, ECS awslogs). |
 | `npm test` | Vitest: unit tests, plus live emulator tests that are skipped when the emulator isn't running. |
 | `npm run shots` | Playwright screenshots of every page into `../aws-emulator-ui-shots` (`SHOTS_DIR` overrides). Fails on console errors or error banners. Needs `npm run seed` first and the UI running. |
 | `npm run typecheck` / `npm run lint` / `npm run build` | The usual checks. |
+
+### Navigation
+
+Every service works like the AWS console: a full-width list, and a row opens that resource on a full page with a
+breadcrumb back to the list (`Services › ECS › demo-cluster`). The selection is kept in the URL, so the
+browser's back button and reloads work.
 
 ## Architecture
 
@@ -231,13 +238,13 @@ All 13 services are implemented in the emulator (crates under `services/`) and w
 | Secrets Manager | |
 | EventBridge / Scheduler | SQS targets need a queue policy for `events.amazonaws.com`; the UI adds it when you add the target. |
 | Step Functions | All state types and the Lambda, SQS, SNS and DynamoDB integrations work. `sns:publish` with a JSON object as `Message` fails (`States.Runtime: … 'Message' is a structure, which this emulator does not bind …`); pass a string, e.g. `"Message.$": "States.JsonToString($)"`. EXPRESS machines run synchronously from the UI (their executions aren't listed, as on AWS). |
-| CloudWatch Logs | The Logs page splits groups into All / Lambda / ECS / Other. Lambda = `/aws/lambda/*`; ECS = `/ecs/*`, `/aws/ecs/*` and any `awslogs-group` used by a task definition in this region. |
+| CloudWatch Logs | **Logs** is a table of log groups (All / Lambda / ECS / Other, prefix search, streams, size, last event). Lambda = `/aws/lambda/*`; ECS = `/ecs/*`, `/aws/ecs/*` and any `awslogs-group` used by a task definition in this region. A group opens on its own page (`/logs/<group>`) with one event view: filter pattern, stream picker, time range (15m / 1h / 24h / All), **Follow** for live tailing, and **Test event** to write one line. |
 | DynamoDB | Tables start `CREATING`. |
 | ECS | See [ECS on AWS Emulator](#ecs-on-aws-emulator). |
 | API Gateway REST (v1) | MOCK methods get a 200 method/integration response. Use **Test invoke** on an API to call it through the emulator's data plane (`/_aws/execute-api/{id}/{stage}/{path}`). |
 | API Gateway HTTP (v2) | Routes can target a Lambda (AWS_PROXY, payload 2.0). **`ExportApi` is NotImplemented** and shows the not-supported state. |
 | ELBv2 | IP targets must sit inside the VPC CIDR (172.31.0.0/16). |
-| ECR | |
+| ECR | `docker push` to the emulator fails with `error from registry: the operation is unsupported` (login works). Push with `npm run ecr-push -- <local-image> <repo>:<tag>`, which uses the ECR layer APIs. **Scan on push** is saved but no scan runs on push (`DescribeImageScanFindings` → `ScanNotFoundException`). **Scan** in the image list calls `StartImageScan`: it completes with 0 findings even for old images such as `alpine:3.12` (the emulator has no vulnerability database), and fails with `UnsupportedImageError` for images without an OS layer. |
 
 ### CloudWatch Logs from Lambda and ECS
 

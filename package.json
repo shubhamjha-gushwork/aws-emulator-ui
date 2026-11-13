@@ -13,7 +13,8 @@
     "smoke": "tsx scripts/smoke.ts",
     "shots": "tsx scripts/screenshots.ts",
     "sfn-deep": "tsx scripts/sfn-deep.ts",
-    "logs-probe": "tsx scripts/logs-probe.ts"
+    "logs-probe": "tsx scripts/logs-probe.ts",
+    "ecr-push": "tsx scripts/ecr-push.ts"
   },
   "dependencies": {
     "@aws-sdk/client-api-gateway": "^3.1168.0",

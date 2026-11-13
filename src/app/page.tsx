@@ -43,11 +43,11 @@ export default function OverviewPage() {
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="font-grotesk text-[28px] font-semibold leading-tight text-neutral-900">Overview</h1>
-          <p className="font-grotesk text-base font-medium text-neutral-500">
+          <h1 className="font-grotesk text-2xl font-medium leading-tight text-neutral-900">Overview</h1>
+          <p className="mt-0.5 text-sm text-neutral-500">
             {status ? (
               <>
-                <span className="font-mono text-sm">{status.endpoint}</span> · {status.region} · checked <TimeAgo value={status.checkedAt} />
+                <span className="font-mono text-[13px]">{status.endpoint}</span> · {status.region} · checked <TimeAgo value={status.checkedAt} />
               </>
             ) : (
               'Connecting to AWS Emulator…'

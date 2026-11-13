@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useSelection } from '@/components/selection';
 import { LuPlus, LuTrash2 } from 'react-icons/lu';
 import { ListCard, Section } from '@/components/ListCard';
 import { PageHeader } from '@/components/PageHeader';
@@ -19,10 +20,14 @@ interface Network { vpcs: { id: string; cidr: string; isDefault?: boolean }[]; s
 const tgName = (arn?: string) => arn?.split(':targetgroup/')[1]?.split('/')[0] ?? arn;
 
 export default function ElbPage() {
-  const [tab, setTab] = useState<'lbs' | 'tgs'>('lbs');
+  const [tab, setTabRaw] = useState<'lbs' | 'tgs'>('lbs');
+  const [tg, setTg] = useSelection('tg');
+  useEffect(() => { if (tg) setTabRaw('tgs'); }, [tg]);
+  const setTab = (t: 'lbs' | 'tgs') => { if (tg) setTg(null); setTabRaw(t); };
+  const detail = tab === 'tgs' && tg ? { name: tg.split('/')[1] ?? tg, onBack: () => setTg(null) } : undefined;
   return (
     <>
-      <PageHeader serviceId="elb" subtitle="Application and network load balancers (ELBv2): listeners, target groups, target health" actions={<Segmented value={tab} onChange={setTab} options={[{ value: 'lbs', label: 'Load balancers' }, { value: 'tgs', label: 'Target groups' }]} />} />
+      <PageHeader serviceId="elb" detail={detail} actions={<Segmented value={tab} onChange={setTab} options={[{ value: 'lbs', label: 'Load balancers' }, { value: 'tgs', label: 'Target groups' }]} />} />
       {tab === 'lbs' ? <LoadBalancers /> : <TargetGroups />}
     </>
   );
@@ -134,7 +139,7 @@ function CreateLb({ open, onClose, onCreated }: { open: boolean; onClose: () => 
 function TargetGroups() {
   const tgs = useAws<TG[]>('elb', 'targetGroups', {});
   const net = useAws<Network>('elb', 'network');
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useSelection('tg');
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [port, setPort] = useState('80');
@@ -143,16 +148,18 @@ function TargetGroups() {
   const selected = tgs.data?.find((t) => t.TargetGroupArn === sel) ?? null;
   const vpc = net.data?.vpcs.find((v) => v.isDefault)?.id ?? net.data?.vpcs[0]?.id;
   return (
-    <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+    <div className="flex flex-col gap-6">
+      {!sel ? (
       <ListCard title="Target groups" subtitle={tgs.data ? `${tgs.data.length} total` : undefined} loading={tgs.loading} error={tgs.error} onReload={tgs.reload} hasData={!!tgs.data} what="DescribeTargetGroups" actions={<Button size="sm" variant="primary" onClick={() => setOpen(true)}><LuPlus /> Create</Button>}>
-        <DataTable rows={tgs.data ?? []} rowKey={(t) => t.TargetGroupArn} selectedKey={sel} onRowClick={(t) => setSel(t.TargetGroupArn)} empty="No target groups." columns={[
+        <DataTable rows={tgs.data ?? []} rowKey={(t) => t.TargetGroupArn} onRowClick={(t) => setSel(t.TargetGroupArn)} empty="No target groups." columns={[
           { key: 'n', header: 'Name', cell: (t) => <span className="font-medium text-neutral-900">{t.TargetGroupName}</span> },
           { key: 'p', header: 'Protocol', cell: (t) => `${t.Protocol}:${t.Port}` },
           { key: 't', header: 'Target type', cell: (t) => <Pill tone="gray">{t.TargetType}</Pill> },
           { key: 'l', header: 'LBs', align: 'right', cell: (t) => t.LoadBalancerArns?.length ?? 0 },
         ]} />
       </ListCard>
-      {selected ? <TgDetail key={selected.TargetGroupArn} tg={selected} onDeleted={() => { setSel(null); void tgs.reload(); }} /> : <ListCard title="Targets"><Empty>Select a target group to see target health.</Empty></ListCard>}
+      ) : null}
+      {selected ? <TgDetail key={selected.TargetGroupArn} tg={selected} onDeleted={() => { setSel(null); void tgs.reload(); }} /> : sel && tgs.data ? <ListCard title="Targets"><Empty>Not found in this region. It may have been deleted.</Empty></ListCard> : null}
       <Modal open={open} onClose={() => setOpen(false)} title="Create target group" description={`IP targets in ${vpc ?? '…'}`} footer={<><Button onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" disabled={!name || !vpc} loading={m.busy} onClick={async () => { if (await m.run('elb', 'createTargetGroup', { name, port, protocol, vpcId: vpc }, `Created ${name}`)) { setOpen(false); setName(''); void tgs.reload(); } }}>Create</Button></>}>
         <Field label="Name"><Input value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
         <div className="grid grid-cols-2 gap-3">

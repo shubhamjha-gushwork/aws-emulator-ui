@@ -65,7 +65,7 @@ export const stepfunctions: ServiceModule = {
       return (await sfn(ctx).send(new GetExecutionHistoryCommand({ executionArn: str(p, 'executionArn'), maxResults: 500 }))).events ?? [];
     },
     async stop(ctx, p) {
-      return sfn(ctx).send(new StopExecutionCommand({ executionArn: str(p, 'executionArn'), cause: 'Stopped from AWS Emulator UI' }));
+      return sfn(ctx).send(new StopExecutionCommand({ executionArn: str(p, 'executionArn'), cause: 'Stopped from AWS Emulator' }));
     },
   },
 };

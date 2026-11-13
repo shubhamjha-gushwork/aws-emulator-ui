@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
-import { LuCheck, LuCopy, LuEye, LuEyeOff, LuLoaderCircle, LuX } from 'react-icons/lu';
+import { LuCheck, LuCopy, LuEye, LuEyeOff, LuInfo, LuLoaderCircle, LuX } from 'react-icons/lu';
 import { cn } from '@/lib/cn';
 
 // ---------- Button
@@ -84,6 +84,20 @@ export function statusTone(status?: string | null): Tone {
 export function StatusPill({ status }: { status?: string | null }) {
   if (!status) return <span className="text-neutral-400">—</span>;
   return <Pill tone={statusTone(status)} dot>{status}</Pill>;
+}
+
+// ---------- Info tooltip (hover/focus, opens downward and leftward so containers don't clip it)
+export function InfoTip({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <span className="group relative inline-flex align-middle">
+      <button type="button" aria-label={label} className="cursor-help rounded text-neutral-400 hover:text-neutral-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
+        <LuInfo className="h-3.5 w-3.5" />
+      </button>
+      <span role="tooltip" className="pointer-events-none absolute top-6 right-0 z-20 w-72 rounded-lg border border-neutral-100 bg-white px-3 py-2 text-left text-xs leading-relaxed font-normal text-neutral-600 normal-case opacity-0 shadow-s4 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+        {children}
+      </span>
+    </span>
+  );
 }
 
 // ---------- Form fields

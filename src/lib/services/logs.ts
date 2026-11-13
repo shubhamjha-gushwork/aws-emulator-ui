@@ -19,7 +19,21 @@ export const logs: ServiceModule = {
         out.push(...(r.logGroups ?? []));
         nextToken = r.nextToken;
       } while (nextToken && out.length < 1000);
-      return out.filter((g) => inRegion(ctx, g.arn));
+      const groups = out.filter((g) => inRegion(ctx, g.arn));
+      if (!p.stats) return groups;
+      // Streams count and last event per group (first 200 groups), for the log groups table.
+      return Promise.all(
+        groups.map(async (g, i) => {
+          if (i >= 200) return g;
+          try {
+            const r = await c.send(new DescribeLogStreamsCommand({ logGroupName: g.logGroupName, orderBy: 'LastEventTime', descending: true, limit: 50 }));
+            const st = r.logStreams ?? [];
+            return { ...g, streamCount: st.length, moreStreams: !!r.nextToken, lastEventTimestamp: st.reduce((m, x) => Math.max(m, x.lastEventTimestamp ?? x.lastIngestionTime ?? 0), 0) || undefined };
+          } catch {
+            return g;
+          }
+        }),
+      );
     },
     /** Log groups referenced by ECS task definitions (awslogs-group), latest revision of each active family. */
     async ecsGroups(ctx) {
@@ -72,6 +86,35 @@ export const logs: ServiceModule = {
         new FilterLogEventsCommand({ logGroupName: str(p, 'group'), filterPattern: optStr(p, 'pattern'), limit: num(p, 'limit', 200) }),
       );
       return r.events ?? [];
+    },
+    /**
+     * One query for the log group view: optional filter pattern, stream and start time, oldest → newest.
+     * Reads up to 5,000 matches and returns the newest `limit` (default 500), so following works on big groups too.
+     */
+    async query(ctx, p) {
+      const c = ctx.client(CloudWatchLogsClient);
+      const limit = Math.min(num(p, 'limit', 500), 2000);
+      const stream = optStr(p, 'stream');
+      const startTime = p.startTime === undefined || p.startTime === null || p.startTime === '' ? undefined : num(p, 'startTime');
+      const events: { eventId?: string; timestamp?: number; message?: string; logStreamName?: string; ingestionTime?: number }[] = [];
+      let nextToken: string | undefined;
+      let pages = 0;
+      do {
+        const r = await c.send(
+          new FilterLogEventsCommand({
+            logGroupName: str(p, 'group'),
+            filterPattern: optStr(p, 'pattern')?.trim() || undefined,
+            logStreamNames: stream ? [stream] : undefined,
+            startTime,
+            nextToken,
+            limit: 1000,
+          }),
+        );
+        events.push(...(r.events ?? []));
+        nextToken = r.nextToken;
+      } while (nextToken && ++pages < 5);
+      events.sort((x, y) => (x.timestamp ?? 0) - (y.timestamp ?? 0));
+      return { events: events.slice(-limit), total: events.length, truncated: events.length > limit || !!nextToken };
     },
     async putEvent(ctx, p) {
       const c = ctx.client(CloudWatchLogsClient);

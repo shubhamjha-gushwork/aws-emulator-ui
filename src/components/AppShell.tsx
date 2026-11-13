@@ -63,7 +63,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Link href="/" className="flex items-center gap-3">
             <img src="https://cdn.gushwork.ai/v2/gush_new_logo.svg" alt="Gushwork" className="h-[30px] w-[30px]" />
             <div className="flex items-baseline gap-2">
-              <span className="font-grotesk text-lg font-semibold text-neutral-900">AWS Emulator UI</span>
+              <span className="font-grotesk text-lg font-semibold text-neutral-900">AWS Emulator</span>
               <span className="hidden text-[13px] text-neutral-500 sm:inline">local console</span>
             </div>
           </Link>

@@ -163,7 +163,7 @@ export const ecs: ServiceModule = {
       return { deregistered: true };
     },
     async stopTask(ctx, p) {
-      return (await ctx.client(ECSClient).send(new StopTaskCommand({ cluster: str(p, 'cluster'), task: str(p, 'task'), reason: 'Stopped from AWS Emulator UI' }))).task;
+      return (await ctx.client(ECSClient).send(new StopTaskCommand({ cluster: str(p, 'cluster'), task: str(p, 'task'), reason: 'Stopped from AWS Emulator' }))).task;
     },
     async createService(ctx, p) {
       const subnet = optStr(p, 'subnet');

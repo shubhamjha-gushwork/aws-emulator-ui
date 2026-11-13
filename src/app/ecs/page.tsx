@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useSelection } from '@/components/selection';
 import { LuPlay, LuPlus, LuScaling, LuSquare, LuTrash2 } from 'react-icons/lu';
 import { ListCard } from '@/components/ListCard';
 import { PageHeader } from '@/components/PageHeader';
@@ -19,16 +20,21 @@ const short = (arn?: string) => (arn ? arn.split('/').pop() : '');
 
 export default function EcsPage() {
   const clusters = useAws<Cluster[]>('ecs', 'clusters');
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useSelection('cluster');
+  const [td, setTd] = useSelection('taskdef');
   const [name, setName] = useState('');
-  const [tab, setTab] = useState<'clusters' | 'taskdefs'>('clusters');
+  const [tab, setTabRaw] = useState<'clusters' | 'taskdefs'>('clusters');
+  useEffect(() => { if (td) setTabRaw('taskdefs'); }, [td]);
+  const setTab = (t: 'clusters' | 'taskdefs') => { if (sel) setSel(null); if (td) setTd(null); setTabRaw(t); };
+  const detail = tab === 'clusters' && sel ? { name: sel.split('/').pop() ?? sel, onBack: () => setSel(null) } : tab === 'taskdefs' && td ? { name: short(td) ?? td, onBack: () => setTd(null) } : undefined;
   const m = useMutation();
   const selected = clusters.data?.find((c) => c.clusterArn === sel) ?? null;
   return (
     <>
-      <PageHeader serviceId="ecs" actions={<Segmented value={tab} onChange={setTab} options={[{ value: 'clusters', label: 'Clusters' }, { value: 'taskdefs', label: 'Task definitions' }]} />} />
+      <PageHeader serviceId="ecs" detail={detail} actions={<Segmented value={tab} onChange={setTab} options={[{ value: 'clusters', label: 'Clusters' }, { value: 'taskdefs', label: 'Task definitions' }]} />} />
       {tab === 'taskdefs' ? <TaskDefinitions /> : (
         <div className="flex flex-col gap-6">
+          {!sel ? (
           <ListCard
             title="Clusters"
             subtitle={clusters.data ? `${clusters.data.length} total` : undefined}
@@ -47,7 +53,6 @@ export default function EcsPage() {
             <DataTable
               rows={clusters.data ?? []}
               rowKey={(c) => c.clusterArn}
-              selectedKey={sel}
               onRowClick={(c) => setSel(c.clusterArn)}
               empty="No clusters yet."
               columns={[
@@ -59,7 +64,8 @@ export default function EcsPage() {
               ]}
             />
           </ListCard>
-          {selected ? <ClusterDetail key={selected.clusterArn} c={selected} onChanged={clusters.reload} onDeleted={() => { setSel(null); void clusters.reload(); }} /> : null}
+          ) : null}
+          {selected ? <ClusterDetail key={selected.clusterArn} c={selected} onChanged={clusters.reload} onDeleted={() => { setSel(null); void clusters.reload(); }} /> : sel && clusters.data ? <ListCard title="Cluster details"><Empty>Not found in this region. It may have been deleted.</Empty></ListCard> : null}
         </div>
       )}
     </>
@@ -195,7 +201,7 @@ function LaunchModal({ open, kind, cluster, onClose, onDone }: { open: boolean; 
 
 function TaskDefinitions() {
   const list = useAws<string[]>('ecs', 'taskDefinitions');
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useSelection('taskdef');
   const detail = useAws<unknown>('ecs', 'describeTaskDefinition', sel ? { taskDefinition: sel } : null);
   const [open, setOpen] = useState(false);
   const [family, setFamily] = useState('');
@@ -207,13 +213,16 @@ function TaskDefinitions() {
   const [confirmDereg, setConfirmDereg] = useState(false);
   const m = useMutation();
   return (
-    <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.2fr)]">
+    <div className="flex flex-col gap-6">
+      {!sel ? (
       <ListCard title="Task definitions" subtitle={list.data ? `${list.data.length} revisions` : undefined} loading={list.loading} error={list.error} onReload={list.reload} hasData={!!list.data} what="ListTaskDefinitions" actions={<Button size="sm" variant="primary" onClick={() => setOpen(true)}><LuPlus /> Register</Button>}>
-        <DataTable rows={list.data ?? []} rowKey={(a) => a} selectedKey={sel} onRowClick={setSel} empty="No task definitions." columns={[{ key: 'a', header: 'Family:revision', cell: (a) => <Mono>{short(a)}</Mono> }]} />
+        <DataTable rows={list.data ?? []} rowKey={(a) => a} onRowClick={setSel} empty="No task definitions." columns={[{ key: 'a', header: 'Family:revision', cell: (a) => <Mono>{short(a)}</Mono> }]} />
       </ListCard>
-      <ListCard title={sel ? short(sel) : 'Definition'} loading={detail.loading} error={detail.error} hasData={!!detail.data} actions={sel ? <Button size="sm" variant="danger" onClick={() => setConfirmDereg(true)}><LuTrash2 /> Deregister</Button> : undefined}>
-        {sel && detail.data ? <div className="p-5"><JsonBlock value={detail.data} maxHeight={560} /></div> : <Empty>Select a revision to see its JSON.</Empty>}
+      ) : (
+      <ListCard title={short(sel)} loading={detail.loading} error={detail.error} hasData={!!detail.data} actions={sel ? <Button size="sm" variant="danger" onClick={() => setConfirmDereg(true)}><LuTrash2 /> Deregister</Button> : undefined}>
+        {detail.data ? <div className="p-5"><JsonBlock value={detail.data} maxHeight={640} /></div> : <Empty>Loading definition…</Empty>}
       </ListCard>
+      )}
       <ConfirmDialog
         open={confirmDereg}
         onClose={() => setConfirmDereg(false)}

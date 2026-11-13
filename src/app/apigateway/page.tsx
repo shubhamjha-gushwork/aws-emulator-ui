@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useSelection } from '@/components/selection';
 import { LuFileDown, LuPlay, LuPlus, LuRocket, LuTrash2 } from 'react-icons/lu';
 import { ListCard, Section } from '@/components/ListCard';
 import { PageHeader } from '@/components/PageHeader';
@@ -57,10 +58,15 @@ function TestInvoke({ apiId, stages, defaultPath, defaultMethod = 'GET' }: { api
 const methodTone = (m: string) => (m === 'GET' ? 'green' : m === 'DELETE' ? 'red' : m === 'POST' ? 'blue' : m === 'ANY' ? 'gray' : 'yellow');
 
 export default function ApiGatewayPage() {
-  const [tab, setTab] = useState<'rest' | 'http'>('rest');
+  const [tab, setTabRaw] = useState<'rest' | 'http'>('rest');
+  const [rest, setRest] = useSelection('rest');
+  const [http, setHttp] = useSelection('http');
+  useEffect(() => { if (http) setTabRaw('http'); }, [http]);
+  const setTab = (t: 'rest' | 'http') => { if (rest) setRest(null); if (http) setHttp(null); setTabRaw(t); };
+  const detail = tab === 'rest' && rest ? { name: rest, onBack: () => setRest(null) } : tab === 'http' && http ? { name: http, onBack: () => setHttp(null) } : undefined;
   return (
     <>
-      <PageHeader serviceId="apigateway" actions={<Segmented value={tab} onChange={setTab} options={[{ value: 'rest', label: 'REST APIs (v1)' }, { value: 'http', label: 'HTTP APIs (v2)' }]} />} />
+      <PageHeader serviceId="apigateway" detail={detail} actions={<Segmented value={tab} onChange={setTab} options={[{ value: 'rest', label: 'REST APIs (v1)' }, { value: 'http', label: 'HTTP APIs (v2)' }]} />} />
       {tab === 'rest' ? <RestTab /> : <HttpTab />}
     </>
   );
@@ -78,17 +84,18 @@ function CreateApiInline({ onCreate, busy }: { onCreate: (name: string) => Promi
 
 function RestTab() {
   const apis = useAws<RestApi[]>('apigateway', 'restApis');
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useSelection('rest');
   const m = useMutation();
   const selected = apis.data?.find((a) => a.id === sel) ?? null;
   return (
-    <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.3fr)]">
+    <div className="flex flex-col gap-6">
+      {!sel ? (
       <ListCard title="REST APIs" subtitle={apis.data ? `${apis.data.length} total` : undefined} loading={apis.loading} error={apis.error} onReload={apis.reload} hasData={!!apis.data} what="GetRestApis"
         actions={<CreateApiInline busy={m.busy} onCreate={async (name) => { const r = await m.run<RestApi>('apigateway', 'createRestApi', { name }, `Created ${name}`); if (r) { setSel(r.id); void apis.reload(); } return !!r; }} />}>
         <DataTable
           rows={apis.data ?? []}
           rowKey={(a) => a.id}
-          selectedKey={sel}
+         
           onRowClick={(a) => setSel(a.id)}
           empty="No REST APIs."
           columns={[
@@ -99,7 +106,8 @@ function RestTab() {
           ]}
         />
       </ListCard>
-      {selected ? <RestDetail key={selected.id} api={selected} onDeleted={() => { setSel(null); void apis.reload(); }} /> : <ListCard title="API details"><Empty>Select an API to see resources, methods and stages.</Empty></ListCard>}
+      ) : null}
+      {selected ? <RestDetail key={selected.id} api={selected} onDeleted={() => { setSel(null); void apis.reload(); }} /> : sel && apis.data ? <ListCard title="API details"><Empty>Not found in this region. It may have been deleted.</Empty></ListCard> : null}
     </div>
   );
 }
@@ -172,17 +180,18 @@ function RestDetail({ api, onDeleted }: { api: RestApi; onDeleted: () => void })
 
 function HttpTab() {
   const apis = useAws<HttpApi[]>('apigateway', 'httpApis');
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useSelection('http');
   const m = useMutation();
   const selected = apis.data?.find((a) => a.ApiId === sel) ?? null;
   return (
-    <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.3fr)]">
+    <div className="flex flex-col gap-6">
+      {!sel ? (
       <ListCard title="HTTP & WebSocket APIs" subtitle={apis.data ? `${apis.data.length} total` : undefined} loading={apis.loading} error={apis.error} onReload={apis.reload} hasData={!!apis.data} what="GetApis"
         actions={<CreateApiInline busy={m.busy} onCreate={async (name) => { const r = await m.run<HttpApi>('apigateway', 'createHttpApi', { name }, `Created ${name}`); if (r) { setSel(r.ApiId); void apis.reload(); } return !!r; }} />}>
         <DataTable
           rows={apis.data ?? []}
           rowKey={(a) => a.ApiId}
-          selectedKey={sel}
+         
           onRowClick={(a) => setSel(a.ApiId)}
           empty="No HTTP APIs."
           columns={[
@@ -192,7 +201,8 @@ function HttpTab() {
           ]}
         />
       </ListCard>
-      {selected ? <HttpDetail key={selected.ApiId} api={selected} onDeleted={() => { setSel(null); void apis.reload(); }} /> : <ListCard title="API details"><Empty>Select an API to see routes, integrations and stages.</Empty></ListCard>}
+      ) : null}
+      {selected ? <HttpDetail key={selected.ApiId} api={selected} onDeleted={() => { setSel(null); void apis.reload(); }} /> : sel && apis.data ? <ListCard title="API details"><Empty>Not found in this region. It may have been deleted.</Empty></ListCard> : null}
     </div>
   );
 }

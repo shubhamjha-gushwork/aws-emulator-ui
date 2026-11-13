@@ -43,7 +43,7 @@ export function ensureHelperRole(ctx: Ctx): Promise<string> {
       await iam.send(new UpdateAssumeRolePolicyCommand({ RoleName: HELPER_ROLE_NAME, PolicyDocument: TRUST }));
     } catch (e) {
       if ((e as Error).name !== 'NoSuchEntityException') throw e;
-      await iam.send(new CreateRoleCommand({ RoleName: HELPER_ROLE_NAME, AssumeRolePolicyDocument: TRUST, Description: 'Created by AWS Emulator UI' }));
+      await iam.send(new CreateRoleCommand({ RoleName: HELPER_ROLE_NAME, AssumeRolePolicyDocument: TRUST, Description: 'Created by AWS Emulator' }));
     }
     await iam.send(new PutRolePolicyCommand({ RoleName: HELPER_ROLE_NAME, PolicyName: 'aws-emulator-ui', PolicyDocument: PERMISSIONS }));
     return DEFAULT_ROLE_ARN;

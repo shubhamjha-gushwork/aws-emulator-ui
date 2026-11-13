@@ -1,6 +1,7 @@
 'use client';
 
 import { useRef, useState } from 'react';
+import { useSelection } from '@/components/selection';
 import { LuDownload, LuFile, LuFolder, LuPlus, LuTrash2, LuUpload } from 'react-icons/lu';
 import { ListCard } from '@/components/ListCard';
 import { PageHeader } from '@/components/PageHeader';
@@ -16,17 +17,17 @@ interface Listing { prefixes: string[]; objects: Obj[]; truncated?: boolean }
 
 export default function S3Page() {
   const list = useAws<Bucket[]>('s3', 'list');
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useSelection('bucket');
   const [creating, setCreating] = useState(false);
   return (
     <>
-      <PageHeader serviceId="s3" actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create bucket</Button>} />
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.4fr)]">
+      <PageHeader serviceId="s3" detail={sel ? { name: sel, onBack: () => setSel(null) } : undefined} actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create bucket</Button>} />
+      <div className="flex flex-col gap-6">
+        {!sel ? (
         <ListCard title="Buckets" subtitle={list.data ? `${list.data.length} total` : undefined} loading={list.loading} error={list.error} onReload={list.reload} hasData={!!list.data} what="ListBuckets">
           <DataTable
             rows={list.data ?? []}
             rowKey={(b) => b.Name}
-            selectedKey={sel}
             onRowClick={(b) => setSel(b.Name)}
             empty="No buckets yet."
             columns={[
@@ -35,9 +36,8 @@ export default function S3Page() {
             ]}
           />
         </ListCard>
-        {sel ? <BucketBrowser key={sel} bucket={sel} onDeleted={() => { setSel(null); void list.reload(); }} /> : (
-          <ListCard title="Objects"><Empty>Select a bucket to browse, upload and download objects.</Empty></ListCard>
-        )}
+        ) : null}
+        {sel ? <BucketBrowser key={sel} bucket={sel} onDeleted={() => { setSel(null); void list.reload(); }} /> : sel && list.data ? <ListCard title="Objects"><Empty>Not found in this region. It may have been deleted.</Empty></ListCard> : null}
       </div>
       <CreateBucket open={creating} onClose={() => setCreating(false)} onCreated={(b) => { setCreating(false); setSel(b); void list.reload(); }} />
     </>

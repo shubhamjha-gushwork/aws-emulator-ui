@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useSelection } from '@/components/selection';
 import { LuPencil, LuPlus, LuTrash2 } from 'react-icons/lu';
 import { ListCard, Section } from '@/components/ListCard';
 import { PageHeader } from '@/components/PageHeader';
@@ -14,18 +15,18 @@ interface Secret { ARN: string; Name: string; Description?: string; LastChangedD
 
 export default function SecretsPage() {
   const list = useAws<Secret[]>('secrets', 'list');
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useSelection('secret');
   const [creating, setCreating] = useState(false);
   const selected = list.data?.find((s) => s.ARN === sel) ?? null;
   return (
     <>
-      <PageHeader serviceId="secrets" actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create secret</Button>} />
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
+      <PageHeader serviceId="secrets" detail={sel ? { name: selected?.Name ?? sel, onBack: () => setSel(null) } : undefined} actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create secret</Button>} />
+      <div className="flex flex-col gap-6">
+        {!sel ? (
         <ListCard title="Secrets" subtitle={list.data ? `${list.data.length} total · values are never listed` : undefined} loading={list.loading} error={list.error} onReload={list.reload} hasData={!!list.data} what="ListSecrets">
           <DataTable
             rows={list.data ?? []}
             rowKey={(s) => s.ARN}
-            selectedKey={sel}
             onRowClick={(s) => setSel(s.ARN)}
             empty="No secrets yet."
             columns={[
@@ -36,9 +37,8 @@ export default function SecretsPage() {
             ]}
           />
         </ListCard>
-        {selected ? <SecretDetail key={selected.ARN} s={selected} onChanged={list.reload} onDeleted={() => { setSel(null); void list.reload(); }} /> : (
-          <ListCard title="Secret details"><Empty>Select a secret. Values stay masked until you click Reveal.</Empty></ListCard>
-        )}
+        ) : null}
+        {selected ? <SecretDetail key={selected.ARN} s={selected} onChanged={list.reload} onDeleted={() => { setSel(null); void list.reload(); }} /> : sel && list.data ? <ListCard title="Secret details"><Empty>Not found in this region. It may have been deleted.</Empty></ListCard> : null}
       </div>
       <CreateSecret open={creating} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void list.reload(); }} />
     </>

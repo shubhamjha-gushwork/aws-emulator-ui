@@ -15,7 +15,7 @@ export async function saveRegion(region: string) {
  * AWS-console-style region menu. `onChange` defaults to saving the region and reloading the page,
  * so every list and count is fetched again for the new region.
  */
-export function RegionPicker({ value, onChange, align = 'right', variant = 'nav' }: { value?: string; onChange?: (code: string) => void | Promise<void>; align?: 'left' | 'right'; variant?: 'nav' | 'field' }) {
+export function RegionPicker({ value, onChange, align = 'right' }: { value?: string; onChange?: (code: string) => void | Promise<void>; align?: 'left' | 'right' }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -55,14 +55,11 @@ export function RegionPicker({ value, onChange, align = 'right', variant = 'nav'
         disabled={busy}
         onClick={() => setOpen(!open)}
         className={cn(
-          'inline-flex cursor-pointer items-center gap-1.5 text-sm transition-colors disabled:opacity-60',
-          variant === 'nav'
-            ? 'h-8 rounded-lg border border-neutral-100 bg-white px-2.5 font-medium text-neutral-800 hover:border-neutral-200'
-            : 'h-10 w-full rounded-lg border border-neutral-200 bg-white px-3 text-neutral-900 hover:border-neutral-300',
+          'inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-neutral-100 bg-white px-2.5 text-sm font-medium text-neutral-800 transition-colors hover:border-neutral-200 disabled:opacity-60',
         )}
       >
         <LuGlobe className="h-4 w-4 text-neutral-500" />
-        <span className={variant === 'nav' ? 'hidden lg:inline' : ''}>{regionName(value)}</span>
+        <span className="hidden lg:inline">{regionName(value)}</span>
         <span className="font-mono text-xs text-neutral-500">{value}</span>
         <LuChevronDown className={cn('ml-auto h-4 w-4 text-neutral-400 transition-transform', open && 'rotate-180')} />
       </button>

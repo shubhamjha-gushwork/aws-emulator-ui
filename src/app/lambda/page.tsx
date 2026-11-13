@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useSelection } from '@/components/selection';
 import { LuPlay, LuPlus, LuTrash2 } from 'react-icons/lu';
 import { ListCard, Section } from '@/components/ListCard';
 import { PageHeader } from '@/components/PageHeader';
@@ -20,19 +21,19 @@ const TEMPLATES: Record<string, string> = {
 
 export default function LambdaPage() {
   const list = useAws<Fn[]>('lambda', 'list');
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useSelection('fn');
   const [creating, setCreating] = useState(false);
   const selected = list.data?.find((f) => f.FunctionName === sel) ?? null;
 
   return (
     <>
-      <PageHeader serviceId="lambda" actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create function</Button>} />
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
+      <PageHeader serviceId="lambda" detail={sel ? { name: sel, onBack: () => setSel(null) } : undefined} actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create function</Button>} />
+      <div className="flex flex-col gap-6">
+        {!sel ? (
         <ListCard title="Functions" subtitle={list.data ? `${list.data.length} total` : undefined} loading={list.loading} error={list.error} onReload={list.reload} hasData={!!list.data} what="ListFunctions">
           <DataTable
             rows={list.data ?? []}
             rowKey={(f) => f.FunctionName}
-            selectedKey={sel}
             onRowClick={(f) => setSel(f.FunctionName)}
             empty="No functions yet. Create one, or run npm run seed."
             columns={[
@@ -44,9 +45,8 @@ export default function LambdaPage() {
             ]}
           />
         </ListCard>
-        {selected ? <FunctionDetail key={selected.FunctionName} fn={selected} onDeleted={() => { setSel(null); void list.reload(); }} /> : (
-          <ListCard title="Function details"><Empty>Select a function to invoke it and see its logs.</Empty></ListCard>
-        )}
+        ) : null}
+        {selected ? <FunctionDetail key={selected.FunctionName} fn={selected} onDeleted={() => { setSel(null); void list.reload(); }} /> : sel && list.data ? <ListCard title="Function details"><Empty>Not found in this region. It may have been deleted.</Empty></ListCard> : null}
       </div>
       <CreateFunction open={creating} onClose={() => setCreating(false)} onCreated={(n) => { setCreating(false); setSel(n); void list.reload(); }} />
     </>

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useSelection } from '@/components/selection';
 import { LuDownload, LuEraser, LuPlus, LuSend, LuTrash2 } from 'react-icons/lu';
 import { ListCard, Section } from '@/components/ListCard';
 import { PageHeader } from '@/components/PageHeader';
@@ -15,18 +16,18 @@ interface Msg { MessageId: string; ReceiptHandle: string; Body: string; Attribut
 
 export default function SqsPage() {
   const list = useAws<Queue[]>('sqs', 'list');
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useSelection('queue');
   const [creating, setCreating] = useState(false);
   const selected = list.data?.find((q) => q.url === sel) ?? null;
   return (
     <>
-      <PageHeader serviceId="sqs" actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create queue</Button>} />
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
+      <PageHeader serviceId="sqs" detail={sel ? { name: sel.split('/').pop()!, onBack: () => setSel(null) } : undefined} actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create queue</Button>} />
+      <div className="flex flex-col gap-6">
+        {!sel ? (
         <ListCard title="Queues" subtitle={list.data ? `${list.data.length} total` : undefined} loading={list.loading} error={list.error} onReload={list.reload} hasData={!!list.data} what="ListQueues">
           <DataTable
             rows={list.data ?? []}
             rowKey={(q) => q.url}
-            selectedKey={sel}
             onRowClick={(q) => setSel(q.url)}
             empty="No queues yet."
             columns={[
@@ -38,9 +39,8 @@ export default function SqsPage() {
             ]}
           />
         </ListCard>
-        {selected ? <QueueDetail key={selected.url} q={selected} onChanged={list.reload} onDeleted={() => { setSel(null); void list.reload(); }} /> : (
-          <ListCard title="Queue details"><Empty>Select a queue to send, receive and purge messages.</Empty></ListCard>
-        )}
+        ) : null}
+        {selected ? <QueueDetail key={selected.url} q={selected} onChanged={list.reload} onDeleted={() => { setSel(null); void list.reload(); }} /> : sel && list.data ? <ListCard title="Queue details"><Empty>Not found in this region. It may have been deleted.</Empty></ListCard> : null}
       </div>
       <CreateQueue open={creating} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void list.reload(); }} />
     </>
@@ -49,7 +49,7 @@ export default function SqsPage() {
 
 function QueueDetail({ q, onChanged, onDeleted }: { q: Queue; onChanged: () => void; onDeleted: () => void }) {
   const fifo = q.attributes.FifoQueue === 'true';
-  const [body, setBody] = useState('{\n  "hello": "from AWS Emulator UI"\n}');
+  const [body, setBody] = useState('{\n  "hello": "from AWS Emulator"\n}');
   const [groupId, setGroupId] = useState('default');
   const [vt, setVt] = useState('30');
   const [msgs, setMsgs] = useState<Msg[] | null>(null);

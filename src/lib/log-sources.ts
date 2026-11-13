@@ -20,3 +20,6 @@ export function capturedStreamName(version: string | undefined, requestId: strin
   const d = now.toISOString().slice(0, 10).replace(/-/g, '/');
   return `${d}/[${version || '$LATEST'}]${UI_CAPTURE_MARKER}-${requestId}`;
 }
+
+/** Link to the full-page view of one log group (names contain slashes, so encode as one segment). */
+export const groupHref = (name: string) => `/logs/${encodeURIComponent(name)}`;

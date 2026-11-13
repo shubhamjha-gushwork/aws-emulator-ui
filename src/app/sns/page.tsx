@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useSelection } from '@/components/selection';
 import { LuPlus, LuSend, LuTrash2 } from 'react-icons/lu';
 import { ListCard, Section } from '@/components/ListCard';
 import { PageHeader } from '@/components/PageHeader';
@@ -15,18 +16,18 @@ interface Sub { SubscriptionArn: string; Protocol: string; Endpoint: string }
 
 export default function SnsPage() {
   const list = useAws<Topic[]>('sns', 'list');
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useSelection('topic');
   const [creating, setCreating] = useState(false);
   const selected = list.data?.find((t) => t.arn === sel) ?? null;
   return (
     <>
-      <PageHeader serviceId="sns" actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create topic</Button>} />
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
+      <PageHeader serviceId="sns" detail={sel ? { name: sel.split(':').pop()!, onBack: () => setSel(null) } : undefined} actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create topic</Button>} />
+      <div className="flex flex-col gap-6">
+        {!sel ? (
         <ListCard title="Topics" subtitle={list.data ? `${list.data.length} total` : undefined} loading={list.loading} error={list.error} onReload={list.reload} hasData={!!list.data} what="ListTopics">
           <DataTable
             rows={list.data ?? []}
             rowKey={(t) => t.arn}
-            selectedKey={sel}
             onRowClick={(t) => setSel(t.arn)}
             empty="No topics yet."
             columns={[
@@ -36,9 +37,8 @@ export default function SnsPage() {
             ]}
           />
         </ListCard>
-        {selected ? <TopicDetail key={selected.arn} t={selected} onDeleted={() => { setSel(null); void list.reload(); }} onChanged={list.reload} /> : (
-          <ListCard title="Topic details"><Empty>Select a topic to publish and manage subscriptions.</Empty></ListCard>
-        )}
+        ) : null}
+        {selected ? <TopicDetail key={selected.arn} t={selected} onDeleted={() => { setSel(null); void list.reload(); }} onChanged={list.reload} /> : sel && list.data ? <ListCard title="Topic details"><Empty>Not found in this region. It may have been deleted.</Empty></ListCard> : null}
       </div>
       <CreateTopic open={creating} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void list.reload(); }} />
     </>

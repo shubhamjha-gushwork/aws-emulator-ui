@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useSelection } from '@/components/selection';
 import { LuPlus, LuPower, LuSend, LuTrash2 } from 'react-icons/lu';
 import { ListCard, Section } from '@/components/ListCard';
 import { PageHeader } from '@/components/PageHeader';
@@ -16,10 +17,15 @@ interface Target { Id: string; Arn: string; Input?: string; RoleArn?: string }
 interface ScheduleSummary { Name: string; GroupName?: string; State?: string; Arn?: string; Target?: { Arn?: string }; CreationDate?: string }
 
 export default function EventBridgePage() {
-  const [tab, setTab] = useState<'rules' | 'buses' | 'scheduler'>('rules');
+  const [tab, setTabRaw] = useState<'rules' | 'buses' | 'scheduler'>('rules');
+  const [rule, setRule] = useSelection('rule');
+  const [sched, setSched] = useSelection('schedule');
+  useEffect(() => { if (sched) setTabRaw('scheduler'); }, [sched]);
+  const setTab = (t: 'rules' | 'buses' | 'scheduler') => { if (rule) setRule(null); if (sched) setSched(null); setTabRaw(t); };
+  const detail = tab === 'rules' && rule ? { name: rule, onBack: () => setRule(null) } : tab === 'scheduler' && sched ? { name: sched.split('/').pop()!, onBack: () => setSched(null) } : undefined;
   return (
     <>
-      <PageHeader serviceId="eventbridge" actions={<Segmented value={tab} onChange={setTab} options={[{ value: 'rules', label: 'Rules' }, { value: 'buses', label: 'Event buses' }, { value: 'scheduler', label: 'Scheduler' }]} />} />
+      <PageHeader serviceId="eventbridge" detail={detail} actions={<Segmented value={tab} onChange={setTab} options={[{ value: 'rules', label: 'Rules' }, { value: 'buses', label: 'Event buses' }, { value: 'scheduler', label: 'Scheduler' }]} />} />
       {tab === 'rules' ? <RulesTab /> : tab === 'buses' ? <BusesTab /> : <SchedulerTab />}
     </>
   );
@@ -27,14 +33,16 @@ export default function EventBridgePage() {
 
 function RulesTab() {
   const buses = useAws<Bus[]>('eventbridge', 'buses');
-  const [bus, setBus] = useState('default');
+  const [busParam, setBusParam] = useSelection('bus');
+  const bus = busParam ?? 'default';
+  const setBus = (b: string) => setBusParam(b === 'default' ? null : b);
   const rules = useAws<Rule[]>('eventbridge', 'rules', { bus });
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useSelection('rule');
   const [creating, setCreating] = useState(false);
   const selected = rules.data?.find((r) => r.Name === sel) ?? null;
   return (
     <div className="flex flex-col gap-6">
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
+        {!sel ? (
         <ListCard
           title="Rules"
           subtitle={rules.data ? `${rules.data.length} on ${bus}` : undefined}
@@ -45,7 +53,7 @@ function RulesTab() {
           what="ListRules"
           actions={
             <>
-              <Select aria-label="Event bus" className="h-8 w-40" value={bus} onChange={(e) => { setBus(e.target.value); setSel(null); }} options={(buses.data ?? [{ Name: 'default' } as Bus]).map((b) => b.Name)} />
+              <Select aria-label="Event bus" className="h-8 w-40" value={bus} onChange={(e) => setBus(e.target.value)} options={(buses.data ?? [{ Name: 'default' } as Bus]).map((b) => b.Name)} />
               <Button size="sm" variant="primary" onClick={() => setCreating(true)}><LuPlus /> Rule</Button>
             </>
           }
@@ -53,7 +61,6 @@ function RulesTab() {
           <DataTable
             rows={rules.data ?? []}
             rowKey={(r) => r.Name}
-            selectedKey={sel}
             onRowClick={(r) => setSel(r.Name)}
             empty="No rules on this bus."
             columns={[
@@ -63,11 +70,11 @@ function RulesTab() {
             ]}
           />
         </ListCard>
-        {selected ? <RuleDetail key={selected.Arn} rule={selected} bus={bus} onChanged={rules.reload} onDeleted={() => { setSel(null); void rules.reload(); }} /> : (
-          <ListCard title="Rule details"><Empty>Select a rule to see its pattern and targets.</Empty></ListCard>
-        )}
-      </div>
-      <PutEvents buses={(buses.data ?? []).map((b) => b.Name)} />
+        ) : null}
+        {selected ? <RuleDetail key={selected.Arn} rule={selected} bus={bus} onChanged={rules.reload} onDeleted={() => { setSel(null); void rules.reload(); }} /> : sel && rules.data ? (
+          <ListCard title="Rule details"><Empty>No rule named {sel} on bus {bus}.</Empty></ListCard>
+        ) : null}
+      {!sel ? <PutEvents buses={(buses.data ?? []).map((b) => b.Name)} /> : null}
       <CreateRule open={creating} bus={bus} onClose={() => setCreating(false)} onCreated={(n) => { setCreating(false); setSel(n); void rules.reload(); }} />
     </div>
   );
@@ -223,15 +230,18 @@ function BusesTab() {
 
 function SchedulerTab() {
   const schedules = useAws<ScheduleSummary[]>('eventbridge', 'schedules', {});
-  const [sel, setSel] = useState<ScheduleSummary | null>(null);
+  const [selKey, setSelKey] = useSelection('schedule');
+  const keyOf = (s: ScheduleSummary) => `${s.GroupName ?? 'default'}/${s.Name}`;
+  const sel = schedules.data?.find((s) => keyOf(s) === selKey) ?? null;
+  const setSel = (s: ScheduleSummary | null) => setSelKey(s ? keyOf(s) : null);
   const [creating, setCreating] = useState(false);
   return (
-    <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
+    <div className="flex flex-col gap-6">
+      {!selKey ? (
       <ListCard title="Schedules" subtitle="EventBridge Scheduler" loading={schedules.loading} error={schedules.error} onReload={schedules.reload} hasData={!!schedules.data} what="ListSchedules" actions={<Button size="sm" variant="primary" onClick={() => setCreating(true)}><LuPlus /> Schedule</Button>}>
         <DataTable
           rows={schedules.data ?? []}
           rowKey={(s) => `${s.GroupName}/${s.Name}`}
-          selectedKey={sel ? `${sel.GroupName}/${sel.Name}` : null}
           onRowClick={setSel}
           empty="No schedules yet."
           columns={[
@@ -241,7 +251,8 @@ function SchedulerTab() {
           ]}
         />
       </ListCard>
-      {sel ? <ScheduleDetail key={`${sel.GroupName}/${sel.Name}`} s={sel} onDeleted={() => { setSel(null); void schedules.reload(); }} /> : <ListCard title="Schedule details"><Empty>Select a schedule.</Empty></ListCard>}
+      ) : null}
+      {sel ? <ScheduleDetail key={keyOf(sel)} s={sel} onDeleted={() => { setSel(null); void schedules.reload(); }} /> : selKey && schedules.data ? <ListCard title="Schedule details"><Empty>Not found in this region. It may have been deleted.</Empty></ListCard> : null}
       <CreateSchedule open={creating} onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void schedules.reload(); }} />
     </div>
   );
