@@ -17,7 +17,7 @@ export default function SecretsPage() {
   const list = useAws<Secret[]>('secrets', 'list');
   const [sel, setSel] = useSelection('secret');
   const [creating, setCreating] = useState(false);
-  const selected = list.data?.find((s) => s.ARN === sel) ?? null;
+  const selected = list.data?.find((s) => s.ARN === sel || s.Name === sel) ?? null;
   return (
     <>
       <PageHeader serviceId="secrets" detail={sel ? { name: selected?.Name ?? sel, onBack: () => setSel(null) } : undefined} actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create secret</Button>} />

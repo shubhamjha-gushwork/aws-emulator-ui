@@ -32,6 +32,8 @@ export interface DeployOptions {
   noBuild: boolean;
   desiredCount?: number;
   kind?: ConfigKind;
+  /** Path to a local .env / .env.local used to fill placeholder secrets. Never sent to real AWS. */
+  envFile?: string;
 }
 
 export interface PlannedResource {
@@ -49,7 +51,7 @@ export interface Plan {
   stage: string;
   region: string;
   resources: PlannedResource[];
-  placeholders: { name: string; keys: string[] }[];
+  placeholders: { name: string; keys: string[]; filled?: string[]; missing?: string[] }[];
   warnings: string[];
   unsupported: string[];
 }
@@ -74,7 +76,7 @@ export interface DeployManifest {
   createdAt: string;
   updatedAt: string;
   resources: ManifestResource[];
-  placeholders: { name: string; keys: string[] }[];
+  placeholders: { name: string; keys: string[]; filled?: string[]; missing?: string[] }[];
   warnings: string[];
 }
 

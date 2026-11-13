@@ -24,11 +24,11 @@ export default function EcsPage() {
   const [td, setTd] = useSelection('taskdef');
   const [name, setName] = useState('');
   const [tab, setTabRaw] = useState<'clusters' | 'taskdefs'>('clusters');
-  useEffect(() => { if (td) setTabRaw('taskdefs'); }, [td]);
+  useEffect(() => { if (td) setTabRaw('taskdefs'); else if (sel) setTabRaw('clusters'); }, [td, sel]);
   const setTab = (t: 'clusters' | 'taskdefs') => { if (sel) setSel(null); if (td) setTd(null); setTabRaw(t); };
   const detail = tab === 'clusters' && sel ? { name: sel.split('/').pop() ?? sel, onBack: () => setSel(null) } : tab === 'taskdefs' && td ? { name: short(td) ?? td, onBack: () => setTd(null) } : undefined;
   const m = useMutation();
-  const selected = clusters.data?.find((c) => c.clusterArn === sel) ?? null;
+  const selected = clusters.data?.find((c) => c.clusterArn === sel || c.clusterName === sel || c.clusterArn.endsWith('/' + sel)) ?? null;
   return (
     <>
       <PageHeader serviceId="ecs" detail={detail} actions={<Segmented value={tab} onChange={setTab} options={[{ value: 'clusters', label: 'Clusters' }, { value: 'taskdefs', label: 'Task definitions' }]} />} />
@@ -202,7 +202,17 @@ function LaunchModal({ open, kind, cluster, onClose, onDone }: { open: boolean; 
 function TaskDefinitions() {
   const list = useAws<string[]>('ecs', 'taskDefinitions');
   const [sel, setSel] = useSelection('taskdef');
-  const detail = useAws<unknown>('ecs', 'describeTaskDefinition', sel ? { taskDefinition: sel } : null);
+  useEffect(() => {
+    if (!sel || !list.data?.length) return;
+    if (list.data.includes(sel)) return;
+    const match = list.data.find((a) => {
+      const tail = a.split('/').pop() ?? a;
+      return tail === sel || tail.startsWith(`${sel}:`) || a.endsWith(`/${sel}`);
+    });
+    if (match) setSel(match);
+  }, [sel, list.data, setSel]);
+  const resolved = sel && list.data?.includes(sel) ? sel : sel;
+  const detail = useAws<unknown>('ecs', 'describeTaskDefinition', resolved ? { taskDefinition: resolved } : null);
   const [open, setOpen] = useState(false);
   const [family, setFamily] = useState('');
   const [image, setImage] = useState('nginx:alpine');

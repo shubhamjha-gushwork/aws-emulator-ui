@@ -15,15 +15,17 @@ import { PutRuleCommand, PutTargetsCommand } from '@aws-sdk/client-eventbridge';
 import type { DeployClients } from '../client';
 import { resourceTags } from '../client';
 import { collectSecrets } from '../interpolate';
-import { PLACEHOLDER_VALUE, uiHref, type DeployManifest, type ManifestResource, type Plan } from '../types';
+import { buildSecretPayload, fillPlaceholderEnv, type EnvMap } from '../envfile';
+import { uiHref, type DeployManifest, type ManifestResource, type Plan } from '../types';
 import { planTrinity, type ParsedTrinity, type TrinityTask } from './parse';
+import { fitFargateResources } from './fargate';
 
 const ROLE = 'arn:aws:iam::000000000000:role/aws-emulator-ui-role';
 
 export async function applyTrinity(
   clients: DeployClients,
   parsed: ParsedTrinity,
-  opts: { dryRun: boolean; noBuild: boolean; desiredCount?: number; id: string; source: string },
+  opts: { dryRun: boolean; noBuild: boolean; desiredCount?: number; id: string; source: string; fileEnv?: EnvMap },
 ): Promise<{ plan: Plan; manifest?: DeployManifest }> {
   const plan = planTrinity(parsed);
   if (opts.dryRun) return { plan };
@@ -31,10 +33,15 @@ export async function applyTrinity(
   const tags = resourceTags({ id: opts.id, stage: parsed.stage, kind: 'trinity', service: parsed.name, source: opts.source });
   const resources: ManifestResource[] = [];
 
+  const fileEnv = opts.fileEnv ?? {};
+  const filledFromEnv: string[] = [];
+  const stillMissing: { name: string; keys: string[] }[] = [];
   for (const s of collectSecrets(parsed.ctx)) {
     const keys = s.keys.length ? s.keys : ['VALUE'];
-    const value = JSON.stringify(Object.fromEntries(keys.map((k) => [k, PLACEHOLDER_VALUE])), null, 2);
-    await upsertSecret(clients, s.name, value);
+    const payload = buildSecretPayload(keys, fileEnv);
+    await upsertSecret(clients, s.name, payload.secretString);
+    filledFromEnv.push(...payload.filled);
+    if (payload.missing.length) stillMissing.push({ name: s.name, keys: payload.missing });
     resources.push({ kind: 'secret', name: s.name, href: uiHref('secret') });
   }
 
@@ -53,8 +60,12 @@ export async function applyTrinity(
       const family = `${task.name}-${parsed.stage}`;
       const logGroup = `/ecs/${family}`;
       await clients.logs.send(new CreateLogGroupCommand({ logGroupName: logGroup })).catch(() => undefined);
-      const cpu = String(task.cpu ?? 256);
-      const memory = String(task.memory ?? 512);
+      const fitted = fitFargateResources(task.cpu ?? 256, task.memory ?? 512);
+      if (fitted.adjusted) {
+        plan.warnings.push(`${task.name}: Fargate cpu/memory ${task.cpu ?? 256}/${task.memory ?? 512} is not a valid pair; using ${fitted.cpu}/${fitted.memory}`);
+      }
+      const cpu = String(fitted.cpu);
+      const memory = String(fitted.memory);
       const port = task.appPort ?? (task.healthCheckPath || stack.kind === 'HTTPApi' ? 8080 : undefined);
       const command = task.handler && !task.dockerfile ? pythonCommand(task) : undefined;
       const td = await clients.ecs.send(new RegisterTaskDefinitionCommand({
@@ -70,7 +81,11 @@ export async function applyTrinity(
           image,
           essential: true,
           command,
-          environment: Object.entries(task.environment || {}).map(([name, value]) => ({ name, value })),
+          environment: Object.entries((() => {
+            const env = { ...(task.environment || {}) };
+            fillPlaceholderEnv(env, fileEnv);
+            return env;
+          })()).map(([name, value]) => ({ name, value })),
           portMappings: port ? [{ containerPort: port, protocol: 'tcp' }] : undefined,
           logConfiguration: {
             logDriver: 'awslogs',
@@ -130,6 +145,9 @@ export async function applyTrinity(
     }
   }
 
+  if (filledFromEnv.length) {
+    plan.warnings.push(`filled ${[...new Set(filledFromEnv)].join(', ')} from local env file`);
+  }
   const now = new Date().toISOString();
   return {
     plan,
@@ -143,7 +161,7 @@ export async function applyTrinity(
       createdAt: now,
       updatedAt: now,
       resources,
-      placeholders: collectSecrets(parsed.ctx).map((s) => ({ name: s.name, keys: s.keys })),
+      placeholders: stillMissing,
       warnings: [...plan.warnings, ...plan.unsupported],
     },
   };

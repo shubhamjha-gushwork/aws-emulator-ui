@@ -22,9 +22,12 @@ const tgName = (arn?: string) => arn?.split(':targetgroup/')[1]?.split('/')[0] ?
 export default function ElbPage() {
   const [tab, setTabRaw] = useState<'lbs' | 'tgs'>('lbs');
   const [tg, setTg] = useSelection('tg');
-  useEffect(() => { if (tg) setTabRaw('tgs'); }, [tg]);
-  const setTab = (t: 'lbs' | 'tgs') => { if (tg) setTg(null); setTabRaw(t); };
-  const detail = tab === 'tgs' && tg ? { name: tg.split('/')[1] ?? tg, onBack: () => setTg(null) } : undefined;
+  const [lb, setLb] = useSelection('lb');
+  useEffect(() => { if (tg) setTabRaw('tgs'); else if (lb) setTabRaw('lbs'); }, [tg, lb]);
+  const setTab = (t: 'lbs' | 'tgs') => { if (tg) setTg(null); if (lb) setLb(null); setTabRaw(t); };
+  const detail = tab === 'tgs' && tg ? { name: tg.split('/')[1] ?? tg, onBack: () => setTg(null) }
+    : tab === 'lbs' && lb ? { name: lb.split('/')[2] ?? lb.split('/').pop() ?? lb, onBack: () => setLb(null) }
+    : undefined;
   return (
     <>
       <PageHeader serviceId="elb" detail={detail} actions={<Segmented value={tab} onChange={setTab} options={[{ value: 'lbs', label: 'Load balancers' }, { value: 'tgs', label: 'Target groups' }]} />} />
@@ -35,9 +38,9 @@ export default function ElbPage() {
 
 function LoadBalancers() {
   const lbs = useAws<LB[]>('elb', 'loadBalancers');
-  const [sel, setSel] = useState<string | null>(null);
+  const [sel, setSel] = useSelection('lb');
   const [creating, setCreating] = useState(false);
-  const selected = lbs.data?.find((l) => l.LoadBalancerArn === sel) ?? null;
+  const selected = lbs.data?.find((l) => l.LoadBalancerArn === sel || l.LoadBalancerName === sel) ?? null;
   return (
     <div className="flex flex-col gap-6">
       <ListCard title="Load balancers" subtitle={lbs.data ? `${lbs.data.length} total` : undefined} loading={lbs.loading} error={lbs.error} onReload={lbs.reload} hasData={!!lbs.data} what="DescribeLoadBalancers" actions={<Button size="sm" variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create ALB</Button>}>
@@ -145,7 +148,7 @@ function TargetGroups() {
   const [port, setPort] = useState('80');
   const [protocol, setProtocol] = useState('HTTP');
   const m = useMutation();
-  const selected = tgs.data?.find((t) => t.TargetGroupArn === sel) ?? null;
+  const selected = tgs.data?.find((t) => t.TargetGroupArn === sel || t.TargetGroupName === sel) ?? null;
   const vpc = net.data?.vpcs.find((v) => v.isDefault)?.id ?? net.data?.vpcs[0]?.id;
   return (
     <div className="flex flex-col gap-6">

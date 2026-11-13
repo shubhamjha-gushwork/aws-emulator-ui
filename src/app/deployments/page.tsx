@@ -118,7 +118,36 @@ export default function DeploymentsPage() {
   );
 }
 
+function hrefFor(r: ManifestResource): string | undefined {
+  const enc = (v: string) => encodeURIComponent(v);
+  const name = r.name;
+  const arn = r.arn;
+  const id = r.id;
+  switch (r.kind) {
+    case 'lambda': return name ? `/lambda?fn=${enc(name)}` : '/lambda';
+    case 'sqs': return `/sqs?queue=${enc(r.url || name)}`;
+    case 's3': return name ? `/s3?bucket=${enc(name)}` : '/s3';
+    case 'secret': return `/secrets?secret=${enc(arn || name)}`;
+    case 'event-rule': return name ? `/eventbridge?rule=${enc(name)}` : '/eventbridge';
+    case 'scheduler': return name ? `/eventbridge?schedule=${enc(name)}` : '/eventbridge';
+    case 'apigateway': return id ? `/apigateway?rest=${enc(id)}` : '/apigateway';
+    case 'apigatewayv2': return id ? `/apigateway?http=${enc(id)}` : '/apigateway';
+    case 'ecs-cluster':
+    case 'ecs-service':
+      return `/ecs?cluster=${enc(arn || r.extra?.cluster || name)}`;
+    case 'ecs-task-definition':
+      return `/ecs?taskdef=${enc(arn || name)}`;
+    case 'ecr': return name ? `/ecr?repo=${enc(name)}` : '/ecr';
+    case 'alb': return `/elb?lb=${enc(arn || name)}`;
+    case 'target-group': return `/elb?tg=${enc(arn || name)}`;
+    case 'listener': return `/elb?lb=${enc(arn || name)}`;
+    case 'log-group': return name ? `/logs/${enc(name)}` : '/logs';
+    default: return r.href;
+  }
+}
+
 function ResourceRow({ r }: { r: ManifestResource }) {
+  const href = hrefFor(r) ?? r.href;
   return (
     <li className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
       <span className="min-w-0 truncate text-neutral-800">
@@ -126,7 +155,7 @@ function ResourceRow({ r }: { r: ManifestResource }) {
         {'  '}
         <Mono className="text-neutral-800">{r.name}</Mono>
       </span>
-      {r.href ? <Link href={r.href} className="shrink-0 text-xs font-medium text-primary-500 hover:underline">Open</Link> : null}
+      {href ? <Link href={href} className="shrink-0 text-xs font-medium text-primary-500 hover:underline">Open</Link> : null}
     </li>
   );
 }

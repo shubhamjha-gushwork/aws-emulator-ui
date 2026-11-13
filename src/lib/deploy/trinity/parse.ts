@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { collectSecrets, createCtx, interpolateTree, type InterpCtx } from '../interpolate';
+import { collectSecrets, createCtx, interpolateTree, promoteSecretsManagerRefs, type InterpCtx } from '../interpolate';
 import { loadYaml } from '../yaml';
 import { type Plan, type PlannedResource, type ResourceKind, uiHref } from '../types';
 
@@ -69,7 +69,7 @@ function strEnv(v: unknown): Record<string, string> {
  * shapes observed in trinity.yml / *.trinity.yml files:
  *   name, account, region, environment.{refs,variables}, custom.{stage}, stacks.{HTTPApi|Fargate|ScheduledFargate}
  */
-export function parseTrinityFile(file: string, opts: { stage: string; region: string; accountId?: string }): ParsedTrinity {
+export function parseTrinityFile(file: string, opts: { stage: string; region: string; accountId?: string; env?: NodeJS.Dict<string> }): ParsedTrinity {
   const raw = fs.readFileSync(file, 'utf8');
   const doc = rec(loadYaml(raw));
   const root = path.dirname(file);
@@ -81,7 +81,11 @@ export function parseTrinityFile(file: string, opts: { stage: string; region: st
   custom.stage = opts.stage;
   doc.custom = custom;
 
-  const ctx = createCtx({ stage: opts.stage, region: opts.region, accountId: opts.accountId, root: doc, fileBase: root });
+  const ctx = createCtx({ stage: opts.stage, region: opts.region, accountId: opts.accountId, root: doc, fileBase: root, env: opts.env });
+  if (doc.custom) interpolateTree(doc.custom, ctx);
+  const refs = rec(rec(doc.environment).refs);
+  interpolateTree(refs, ctx);
+  promoteSecretsManagerRefs(refs, ctx);
   interpolateTree(doc, ctx);
 
   const warnings = [...ctx.warnings];

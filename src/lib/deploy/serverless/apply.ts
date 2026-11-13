@@ -22,6 +22,7 @@ import type { DeployClients } from '../client';
 import { resourceTags } from '../client';
 import { PLACEHOLDER_VALUE, uiHref, type DeployManifest, type ManifestResource, type Plan } from '../types';
 import { collectSecrets } from '../interpolate';
+import { buildSecretPayload, fillPlaceholderEnv, type EnvMap } from '../envfile';
 import { packageFunction } from './package';
 import type { ParsedServerless, SlsFunction } from './parse';
 import { planServerless } from './parse';
@@ -31,7 +32,7 @@ const ROLE = 'arn:aws:iam::000000000000:role/aws-emulator-ui-role';
 export async function applyServerless(
   clients: DeployClients,
   parsed: ParsedServerless,
-  opts: { dryRun: boolean; id: string; source: string },
+  opts: { dryRun: boolean; id: string; source: string; fileEnv?: EnvMap },
 ): Promise<{ plan: Plan; manifest?: DeployManifest }> {
   const plan = planServerless(parsed);
   if (opts.dryRun) return { plan };
@@ -40,11 +41,16 @@ export async function applyServerless(
   const resources: ManifestResource[] = [];
   const logical: Record<string, { arn?: string; url?: string; name: string; id?: string }> = {};
 
-  // 1. Placeholder secrets
+  // 1. Secrets (filled from a local --env-file when keys match; never from real AWS)
+  const fileEnv = opts.fileEnv ?? {};
+  const filledFromEnv: string[] = [];
+  const stillMissing: { name: string; keys: string[] }[] = [];
   for (const s of collectSecrets(parsed.ctx)) {
     const keys = s.keys.length ? s.keys : ['VALUE'];
-    const value = JSON.stringify(Object.fromEntries(keys.map((k) => [k, PLACEHOLDER_VALUE])), null, 2);
-    await upsertSecret(clients, s.name, value);
+    const payload = buildSecretPayload(keys, fileEnv);
+    await upsertSecret(clients, s.name, payload.secretString);
+    filledFromEnv.push(...payload.filled);
+    if (payload.missing.length) stillMissing.push({ name: s.name, keys: payload.missing });
     resources.push({ kind: 'secret', name: s.name, href: uiHref('secret') });
   }
 
@@ -100,6 +106,7 @@ export async function applyServerless(
       continue;
     }
     const env = { ...fn.environment };
+    fillPlaceholderEnv(env, fileEnv);
     const created = await upsertLambda(clients, {
       name: packed.deployedName,
       runtime: packed.runtime,
@@ -185,6 +192,9 @@ export async function applyServerless(
     resources.push({ kind: 'sfn', name: sm.name, arn, href: uiHref('sfn') });
   }
 
+  if (filledFromEnv.length) {
+    plan.warnings.push(`filled ${[...new Set(filledFromEnv)].join(', ')} from local env file`);
+  }
   const now = new Date().toISOString();
   const manifest: DeployManifest = {
     id: opts.id,
@@ -196,7 +206,7 @@ export async function applyServerless(
     createdAt: now,
     updatedAt: now,
     resources,
-    placeholders: collectSecrets(parsed.ctx).map((s) => ({ name: s.name, keys: s.keys })),
+    placeholders: stillMissing,
     warnings: [...plan.warnings, ...plan.unsupported],
   };
   return { plan, manifest };

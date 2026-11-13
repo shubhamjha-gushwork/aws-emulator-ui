@@ -118,7 +118,26 @@ npx aws-emulator list
 npx aws-emulator destroy /path/to/service          # or a deployment id from `list`
 ```
 
-Options: `--stage` (default `local`), `--region` (default `us-east-1` or the UI setting), `--endpoint`, `--dry-run`, `--no-build` (skip Docker build/push for Trinity), `--desired-count N`, `--kind serverless|trinity`.
+Options: `--stage` (default `local`), `--region` (default `us-east-1` or the UI setting), `--endpoint`, `--dry-run`, `--no-build` (skip Docker build/push for Trinity), `--desired-count N`, `--kind serverless|trinity`, `--env-file <path>`.
+
+### Filling secrets from a local .env
+
+The CLI never reads SSM or Secrets Manager from real AWS. To give local values to the placeholder secrets a file references, pass a dotenv file (or keep one in the repo):
+
+```bash
+# uses <repo>/.env.local if present, otherwise <repo>/.env
+npx aws-emulator deploy ./path/to/service --stage local
+npx aws-emulator deploy ./path/to/service --env-file ./path/to/service/.env
+
+# list required keys and which of them are missing (values are never printed)
+npx aws-emulator secrets ./path/to/service
+npx aws-emulator secrets ./path/to/service --env-file ./path/to/.env --write-example
+```
+
+`--env-file` (default: `.env.local` then `.env` in the target repo) is parsed as `KEY=VALUE`. Keys are matched by name to the SSM / Secrets Manager keys the YAML references. For a JSON secret such as `appSecrets`, the CLI builds the JSON object from the matching keys and leaves any others as the placeholder string. Matching keys also replace `PLACEHOLDER` values in Lambda and ECS task environment variables. Trinity `environment.refs` that are Secrets Manager ARNs are treated the same way as `${ssm:…}`.
+
+`aws-emulator secrets` prints each secret and whether each key is `present` or `missing` in the env file. `--write-example [path]` writes a key-names-only template (`KEY=`, no values). Do not commit real `.env` files; this repo gitignores `.env*`.
+
 
 A directory is scanned for `serverless.yml` / `serverless.yaml`, `trinity.yml` / `trinity.yaml` and `*.trinity.yml`. Point at a file to deploy just that one. Recorded deploys show up on the **Deployments** page in the UI, with links to the resources they created.
 
@@ -150,7 +169,7 @@ A directory is scanned for `serverless.yml` / `serverless.yaml`, `trinity.yml` /
 - We evaluated running the official `serverless deploy` against Floci. CloudFormation itself works there (a simple stack creates resources), but a real `serverless deploy` also resolves `${ssm:}` (which must never hit real AWS), and plugins such as domain-manager, global-authorizer, lift custom resources and Python packaging are not reliable against Floci. The CLI therefore **translates** the YAML and talks to service APIs directly.
 - Container-image Lambdas (`provider.ecr` / `image:`) are not packaged.
 - `serverless-offline`, tracing, and prune plugins are ignored.
-- Placeholder secrets contain the literal value `PLACEHOLDER — set this value in Floci Secrets Manager`. Lambdas and tasks will start, but they will not have real credentials.
+- Placeholder secrets contain the literal value `PLACEHOLDER — set this value in Floci Secrets Manager` unless a local `--env-file` (or `.env.local` / `.env`) provides the same key names. Values from that file are written only to Floci Secrets Manager and to the function/task environment; they are never printed and never read from real AWS.
 - Idempotent re-deploy updates existing functions, queues, services and so on rather than failing. `destroy` removes what that deploy recorded (by id, tagged where the API accepts tags).
 - Trinity Docker builds use the service directory as context; huge repos will be slow. Prefer `--no-build` once an image is already in Floci ECR.
 

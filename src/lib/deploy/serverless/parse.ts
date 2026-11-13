@@ -84,11 +84,11 @@ function strEnv(env: unknown): Record<string, string> {
   return out;
 }
 
-export function parseServerlessFile(file: string, opts: { stage: string; region: string; accountId?: string }): ParsedServerless {
+export function parseServerlessFile(file: string, opts: { stage: string; region: string; accountId?: string; env?: NodeJS.Dict<string> }): ParsedServerless {
   const raw = fs.readFileSync(file, 'utf8');
   const doc = asRecord(loadYaml(raw));
   const root = path.dirname(file);
-  const ctx = createCtx({ stage: opts.stage, region: opts.region, accountId: opts.accountId, root: doc, fileBase: root });
+  const ctx = createCtx({ stage: opts.stage, region: opts.region, accountId: opts.accountId, root: doc, fileBase: root, env: opts.env });
   interpolateTree(doc, ctx);
 
   const warnings = [...ctx.warnings];

@@ -18,7 +18,7 @@ export default function SqsPage() {
   const list = useAws<Queue[]>('sqs', 'list');
   const [sel, setSel] = useSelection('queue');
   const [creating, setCreating] = useState(false);
-  const selected = list.data?.find((q) => q.url === sel) ?? null;
+  const selected = list.data?.find((q) => q.url === sel || q.url.endsWith('/' + sel) || q.url.split('/').pop() === sel) ?? null;
   return (
     <>
       <PageHeader serviceId="sqs" detail={sel ? { name: sel.split('/').pop()!, onBack: () => setSel(null) } : undefined} actions={<Button variant="primary" onClick={() => setCreating(true)}><LuPlus /> Create queue</Button>} />

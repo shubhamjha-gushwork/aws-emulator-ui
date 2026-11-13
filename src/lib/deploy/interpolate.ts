@@ -302,6 +302,59 @@ export function resolveConstructTokens<T>(value: T, ctx: InterpCtx): T {
   return again(value) as T;
 }
 
+
+/**
+ * Turn Secrets Manager ARNs / ssm paths written as plain strings
+ * (common in Trinity environment.refs) into SecretBags so key lookups are tracked.
+ * The original account id in an ARN is not stored or logged.
+ */
+export function promoteSecretsManagerRefs(value: unknown, ctx: InterpCtx): void {
+  const walk = (v: unknown, parent?: Record<string, unknown>, key?: string): void => {
+    if (typeof v === 'string' && parent && key !== undefined) {
+      const bag = secretBagFromRefString(v, ctx);
+      if (bag) parent[key] = bag;
+      return;
+    }
+    if (Array.isArray(v)) {
+      v.forEach((item, i) => {
+        if (typeof item === 'string') {
+          const bag = secretBagFromRefString(item, ctx);
+          if (bag) v[i] = bag;
+        } else {
+          walk(item);
+        }
+      });
+      return;
+    }
+    if (v && typeof v === 'object' && !(v instanceof SecretBag)) {
+      const o = v as Record<string, unknown>;
+      for (const k of Object.keys(o)) walk(o[k], o, k);
+    }
+  };
+  walk(value);
+}
+
+function secretBagFromRefString(raw: string, ctx: InterpCtx): SecretBag | undefined {
+  const s = raw.trim();
+  if (!s || s.startsWith('${')) return undefined;
+  let leaf: string | undefined;
+  const arn = s.match(/^arn:aws:secretsmanager:[^:]+:[^:]+:secret:(.+)$/i);
+  if (arn) leaf = arn[1];
+  else if (/\/aws\/reference\/secretsmanager\//i.test(s)) {
+    leaf = s.replace(/^.*\/aws\/reference\/secretsmanager\//i, '');
+  } else {
+    return undefined;
+  }
+  leaf = leaf.replace(/-\*$/, '');
+  const name = localSecretName(ctx.stage, leaf);
+  let bag = ctx.secrets.get(name);
+  if (!bag) {
+    bag = new SecretBag(name, 'secretsmanager');
+    ctx.secrets.set(name, bag);
+  }
+  return bag;
+}
+
 export function collectSecrets(ctx: InterpCtx): { name: string; keys: string[]; source: string }[] {
   return [...ctx.secrets.values()].map((b) => ({ name: b.name, keys: [...b.keys].sort(), source: b.source }));
 }
