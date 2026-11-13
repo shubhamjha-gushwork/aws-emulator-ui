@@ -278,7 +278,7 @@ function loadFile(rel: string, subpath: string | undefined, ctx: InterpCtx): unk
   try {
     const raw = fs.readFileSync(file, 'utf8');
     let doc: unknown;
-    if (/\.ya?ml$/i.test(file)) doc = loadYaml(raw);
+    if (/\.ya?ml$/i.test(file)) doc = loadYaml(raw, file);
     else if (/\.json$/i.test(file)) doc = JSON.parse(raw);
     else doc = raw;
     // ${self:} always refers to the service document, not the included file (Serverless Framework behavior).

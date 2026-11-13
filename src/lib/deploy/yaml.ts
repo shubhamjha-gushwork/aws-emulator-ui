@@ -29,8 +29,16 @@ const CFN: Type[] = [
 
 const SCHEMA = DEFAULT_SCHEMA.extend(CFN);
 
-export function loadYaml(text: string): unknown {
-  return load(text, { schema: SCHEMA }) ?? {};
+/** `filename` (when given) is included in parse errors, e.g. "invalid YAML in serverless.yml (3:5)". */
+export function loadYaml(text: string, filename?: string): unknown {
+  try {
+    return load(text, { schema: SCHEMA }) ?? {};
+  } catch (e) {
+    if (filename && e instanceof Error && e.name === 'YAMLException') {
+      e.message = `invalid YAML in ${filename}: ${e.message}`;
+    }
+    throw e;
+  }
 }
 
 export function dumpYaml(doc: unknown): string {

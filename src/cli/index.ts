@@ -134,6 +134,7 @@ async function main() {
   if (cmd === 'deploy' || cmd === 'plan') {
     if (!positional[0]) usage(2);
     const o = common();
+    endpointForErrors = o.endpoint;
     console.log(`${o.dryRun ? 'Planning' : 'Deploying'} ${o.source} → ${o.endpoint}  (${o.region}, stage ${o.stage})`);
     const result = await deployAll(o);
     if (result.envFile) console.log(`Using env file ${result.envFile} (values not printed)`);
@@ -190,6 +191,7 @@ async function main() {
     if (!positional[0]) usage(2);
     const target = positional[0];
     const o = common();
+    endpointForErrors = o.endpoint;
     // A path: destroy every recorded deploy whose source lives under it. An id: that deploy only.
     const all = listManifests();
     const abs = path.resolve(target);
@@ -207,7 +209,19 @@ async function main() {
   usage(2);
 }
 
+/** One-line, friendly messages for the common failures; never a stack dump. */
+function friendlyError(e: unknown, endpoint?: string): string {
+  const err = e as { message?: string; code?: string; name?: string; cause?: { code?: string } };
+  const code = err?.code || err?.cause?.code || '';
+  const msg = err?.message ?? String(e);
+  if (['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EHOSTUNREACH', 'ETIMEDOUT'].includes(code) || /ECONNREFUSED|ENOTFOUND|socket hang up/.test(msg)) {
+    return `Floci is not answering at ${endpoint ?? 'the endpoint'} (${code || msg}). Start it with scripts/start-local.sh, or pass --endpoint.`;
+  }
+  return msg;
+}
+
+let endpointForErrors: string | undefined;
 main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
+  console.error(`✗ ${friendlyError(e, endpointForErrors)}`);
   process.exit(1);
 });

@@ -72,7 +72,7 @@ function strEnv(v: unknown): Record<string, string> {
  */
 export function parseTrinityFile(file: string, opts: { stage: string; region: string; accountId?: string; env?: NodeJS.Dict<string>; fileEnv?: NodeJS.Dict<string> }): ParsedTrinity {
   const raw = fs.readFileSync(file, 'utf8');
-  const doc = rec(loadYaml(raw));
+  const doc = rec(loadYaml(raw, file));
   const root = path.dirname(file);
   // Inject custom.stage and fall back to custom.dev when custom.<stage> is missing.
   const custom = rec(doc.custom);
