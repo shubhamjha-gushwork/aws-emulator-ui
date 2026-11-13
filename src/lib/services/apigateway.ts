@@ -1,12 +1,31 @@
 import {
   APIGatewayClient, GetRestApisCommand, CreateRestApiCommand, DeleteRestApiCommand, GetResourcesCommand, GetStagesCommand,
   GetDeploymentsCommand, CreateDeploymentCommand, CreateResourceCommand, PutMethodCommand, PutIntegrationCommand,
+  PutMethodResponseCommand, PutIntegrationResponseCommand,
 } from '@aws-sdk/client-api-gateway';
+import https from 'node:https';
 import {
   ApiGatewayV2Client, GetApisCommand, CreateApiCommand, DeleteApiCommand, GetRoutesCommand, GetStagesCommand as GetStagesV2Command,
-  GetIntegrationsCommand, CreateRouteCommand, CreateStageCommand, DeleteRouteCommand, ExportApiCommand,
+  GetIntegrationsCommand, CreateRouteCommand, CreateStageCommand, DeleteRouteCommand, ExportApiCommand, CreateIntegrationCommand,
 } from '@aws-sdk/client-apigatewayv2';
-import { type ServiceModule, str, optStr, safeCount, decodeBytes } from './types';
+import { type ServiceModule, str, optStr, safeCount, decodeBytes, InputError } from './types';
+
+/** Call a deployed API through the emulator's data plane: `/_aws/execute-api/{api-id}/{stage}/{path}`. */
+function invokeDataPlane(endpoint: string, agent: https.Agent, path: string, method: string, body?: string) {
+  return new Promise<{ status: number; headers: Record<string, string>; body: string; url: string }>((resolve, reject) => {
+    const url = new URL(path, endpoint);
+    const req = https.request(url, { method, agent, headers: body ? { 'content-type': 'application/json' } : {}, timeout: 30000 }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (d) => (data += d));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: Object.fromEntries(Object.entries(res.headers).map(([k, v]) => [k, String(v)])), body: data.slice(0, 64 * 1024), url: url.toString() }));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('Timed out after 30s')));
+    if (body) req.write(body);
+    req.end();
+  });
+}
 
 export const apigateway: ServiceModule = {
   async counts(ctx) {
@@ -48,8 +67,22 @@ export const apigateway: ServiceModule = {
       const pathPart = str(p, 'pathPart');
       const existing = resources.find((r) => r.path === `/${pathPart}`);
       const res = existing ?? (await c.send(new CreateResourceCommand({ restApiId, parentId: root!.id!, pathPart })));
-      await c.send(new PutMethodCommand({ restApiId, resourceId: res.id!, httpMethod: method, authorizationType: 'NONE' }));
+      try {
+        await c.send(new PutMethodCommand({ restApiId, resourceId: res.id!, httpMethod: method, authorizationType: 'NONE' }));
+      } catch (e) {
+        if ((e as Error).name !== 'ConflictException') throw e; // method exists: just (re)configure its MOCK integration
+      }
       await c.send(new PutIntegrationCommand({ restApiId, resourceId: res.id!, httpMethod: method, type: 'MOCK', requestTemplates: { 'application/json': '{"statusCode": 200}' } }));
+      // Without a method + integration response, a MOCK integration answers 500 "Internal server error" (as on AWS).
+      await c.send(new PutMethodResponseCommand({ restApiId, resourceId: res.id!, httpMethod: method, statusCode: '200' })).catch((e: Error) => {
+        if (e.name !== 'ConflictException') throw e;
+      });
+      await c.send(
+        new PutIntegrationResponseCommand({
+          restApiId, resourceId: res.id!, httpMethod: method, statusCode: '200',
+          responseTemplates: { 'application/json': optStr(p, 'responseBody') ?? `{"ok": true, "mock": true, "path": "/${pathPart}"}` },
+        }),
+      );
       return { resourceId: res.id, path: `/${pathPart}`, method };
     },
     async createDeployment(ctx, p) {
@@ -76,11 +109,31 @@ export const apigateway: ServiceModule = {
       return (await ctx.client(ApiGatewayV2Client).send(new GetIntegrationsCommand({ ApiId: str(p, 'id') }))).Items ?? [];
     },
     async createHttpRoute(ctx, p) {
-      return ctx.client(ApiGatewayV2Client).send(new CreateRouteCommand({ ApiId: str(p, 'id'), RouteKey: str(p, 'routeKey') }));
+      const c = ctx.client(ApiGatewayV2Client);
+      const ApiId = str(p, 'id');
+      const lambdaArn = optStr(p, 'lambdaArn');
+      let Target: string | undefined;
+      if (lambdaArn) {
+        // Lambda proxy integration (payload format 2.0), the usual HTTP API backend.
+        const integ = await c.send(new CreateIntegrationCommand({ ApiId, IntegrationType: 'AWS_PROXY', IntegrationUri: lambdaArn, PayloadFormatVersion: '2.0' }));
+        Target = `integrations/${integ.IntegrationId}`;
+      }
+      return c.send(new CreateRouteCommand({ ApiId, RouteKey: str(p, 'routeKey'), Target }));
     },
     async deleteHttpRoute(ctx, p) {
       await ctx.client(ApiGatewayV2Client).send(new DeleteRouteCommand({ ApiId: str(p, 'id'), RouteId: str(p, 'routeId') }));
       return { deleted: true };
+    },
+    /** Test-invoke a deployed REST stage or HTTP API route through the emulator's data plane. */
+    async invoke(ctx, p) {
+      const id = str(p, 'id');
+      if (!/^[a-z0-9]+$/i.test(id)) throw new InputError('Invalid API id');
+      const stage = optStr(p, 'stage') ?? '$default';
+      const method = (optStr(p, 'method') ?? 'GET').toUpperCase();
+      const path = optStr(p, 'path') ?? '/';
+      if (!/^\/[\w\-./{}~%]*$/.test(path)) throw new InputError('Path must start with / and contain only URL path characters');
+      const prefix = stage === '$default' ? `/_aws/execute-api/${id}` : `/_aws/execute-api/${id}/${encodeURIComponent(stage)}`;
+      return invokeDataPlane(ctx.cfg.endpoint, ctx.cfg.httpsAgent, `${prefix}${path}`, method, optStr(p, 'body'));
     },
     /** OpenAPI 3.0 export (the emulator currently answers NotImplemented — the UI shows that state). */
     async exportHttpApi(ctx, p) {

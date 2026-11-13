@@ -11,7 +11,9 @@
     "test": "vitest run",
     "seed": "tsx scripts/seed.ts",
     "smoke": "tsx scripts/smoke.ts",
-    "shots": "tsx scripts/screenshots.ts"
+    "shots": "tsx scripts/screenshots.ts",
+    "sfn-deep": "tsx scripts/sfn-deep.ts",
+    "logs-probe": "tsx scripts/logs-probe.ts"
   },
   "dependencies": {
     "@aws-sdk/client-api-gateway": "^3.1168.0",

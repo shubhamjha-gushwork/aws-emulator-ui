@@ -94,3 +94,59 @@ describe('catalog', () => {
     }
   });
 });
+
+import { arnRegion, inRegion, type Ctx } from '@/lib/services/types';
+import { logSource, capturedStreamName, isUiCapturedStream } from '@/lib/log-sources';
+import { orderStates } from '@/lib/asl';
+import { REGIONS, regionName } from '@/lib/regions';
+
+describe('region scoping', () => {
+  const ctx = { cfg: { region: 'ap-south-1' } } as unknown as Ctx;
+  it('reads the region out of an ARN', () => {
+    expect(arnRegion('arn:aws:ecs:ap-south-1:000000000000:cluster/a')).toBe('ap-south-1');
+    expect(arnRegion('arn:aws:iam::000000000000:role/x')).toBeUndefined();
+    expect(arnRegion('not-an-arn')).toBeUndefined();
+  });
+  it('keeps same-region and region-less ARNs, drops other regions', () => {
+    expect(inRegion(ctx, 'arn:aws:ecs:ap-south-1:000000000000:cluster/a')).toBe(true);
+    expect(inRegion(ctx, 'arn:aws:ecs:us-east-1:000000000000:cluster/a')).toBe(false);
+    expect(inRegion(ctx, 'arn:aws:iam::000000000000:role/x')).toBe(true);
+    expect(inRegion(ctx, undefined)).toBe(true);
+  });
+  it('offers the configured regions with names', () => {
+    expect(REGIONS.map((r) => r.code)).toEqual(['ap-south-1', 'ap-southeast-1', 'us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'eu-central-1']);
+    expect(regionName('ap-south-1')).toBe('Asia Pacific (Mumbai)');
+    expect(regionName('xx-test-9')).toBe('xx-test-9');
+  });
+});
+
+describe('settings never keep credentials', () => {
+  it('drops access keys and the old manual mode', () => {
+    const s = sanitizeSettings({ region: 'ap-south-1', accessKeyId: 'AKIA', secretAccessKey: 'shh', credentialsMode: 'manual' } as never);
+    expect(s).toEqual({ ...DEFAULT_SETTINGS, region: 'ap-south-1' });
+    expect(Object.keys(s).sort()).toEqual(['endpoint', 'region', 'tlsVerify']);
+  });
+});
+
+describe('log sources', () => {
+  it('classifies groups by prefix and ECS task definitions', () => {
+    expect(logSource('/aws/lambda/fn')).toBe('lambda');
+    expect(logSource('/ecs/web')).toBe('ecs');
+    expect(logSource('/aws/ecs/containerinsights/x')).toBe('ecs');
+    expect(logSource('/custom/app', ['/custom/app'])).toBe('ecs');
+    expect(logSource('/demo/app')).toBe('other');
+  });
+  it('labels streams captured by the UI', () => {
+    const n = capturedStreamName('$LATEST', 'abc-123', new Date('2026-11-13T10:00:00Z'));
+    expect(n).toBe('2026/11/13/[$LATEST]captured-by-ui-abc-123');
+    expect(isUiCapturedStream(n)).toBe(true);
+    expect(isUiCapturedStream('2026/11/13/[$LATEST]0123abcd')).toBe(false);
+  });
+});
+
+describe('state machine step list', () => {
+  it('orders states by transitions from StartAt', () => {
+    const def = { StartAt: 'A', States: { Z: { Type: 'Pass', End: true }, C: { Type: 'Succeed' }, A: { Type: 'Choice', Choices: [{ Next: 'B' }], Default: 'C' }, B: { Type: 'Pass', Next: 'C' } } };
+    expect(orderStates(def)).toEqual(['A', 'B', 'C', 'Z']);
+  });
+});

@@ -9,10 +9,8 @@ export async function GET() {
   return jsonResponse({
     endpoint: cfg.endpoint,
     region: cfg.region,
-    credentialSource: cfg.credentialSource,
     caLoaded: cfg.caLoaded,
     tlsVerify: cfg.tlsVerify,
-    runDir: cfg.runDir,
     health,
     checkedAt: new Date().toISOString(),
   });

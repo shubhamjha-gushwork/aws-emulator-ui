@@ -2,12 +2,12 @@ import {
   CloudWatchLogsClient, DescribeLogGroupsCommand, CreateLogGroupCommand, DeleteLogGroupCommand, DescribeLogStreamsCommand,
   GetLogEventsCommand, FilterLogEventsCommand, CreateLogStreamCommand, PutLogEventsCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
-import { type ServiceModule, str, optStr, num, safeCount } from './types';
+import { ECSClient, ListTaskDefinitionFamiliesCommand, DescribeTaskDefinitionCommand } from '@aws-sdk/client-ecs';
+import { type ServiceModule, str, optStr, num, safeCount, inRegion } from './types';
 
 export const logs: ServiceModule = {
   async counts(ctx) {
-    const c = ctx.client(CloudWatchLogsClient);
-    return [{ label: 'Log groups', value: await safeCount(async () => (await c.send(new DescribeLogGroupsCommand({}))).logGroups?.length ?? 0) }];
+    return [{ label: 'Log groups', value: await safeCount(async () => ((await logs.actions.groups(ctx, {})) as unknown[]).length) }];
   },
   actions: {
     async groups(ctx, p) {
@@ -19,7 +19,26 @@ export const logs: ServiceModule = {
         out.push(...(r.logGroups ?? []));
         nextToken = r.nextToken;
       } while (nextToken && out.length < 1000);
-      return out;
+      return out.filter((g) => inRegion(ctx, g.arn));
+    },
+    /** Log groups referenced by ECS task definitions (awslogs-group), latest revision of each active family. */
+    async ecsGroups(ctx) {
+      const ecs = ctx.client(ECSClient);
+      const families = ((await ecs.send(new ListTaskDefinitionFamiliesCommand({ status: 'ACTIVE' }))).families ?? []).slice(0, 100);
+      const groups = new Set<string>();
+      for (const family of families) {
+        try {
+          const td = (await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: family }))).taskDefinition;
+          if (!inRegion(ctx, td?.taskDefinitionArn)) continue;
+          for (const c of td?.containerDefinitions ?? []) {
+            const g = c.logConfiguration?.logDriver === 'awslogs' ? c.logConfiguration.options?.['awslogs-group'] : undefined;
+            if (g) groups.add(g);
+          }
+        } catch {
+          // a family from another region or a deleted revision; skip it
+        }
+      }
+      return [...groups];
     },
     async createGroup(ctx, p) {
       await ctx.client(CloudWatchLogsClient).send(new CreateLogGroupCommand({ logGroupName: str(p, 'name') }));

@@ -11,7 +11,7 @@ import { useAws } from '@/components/use-aws';
 import { useMutation } from '@/components/mutate';
 
 interface Fn { FunctionName: string; FunctionArn: string; Runtime?: string; Handler?: string; MemorySize?: number; Timeout?: number; LastModified?: string; CodeSize?: number; State?: string; Role?: string; PackageType?: string; Architectures?: string[] }
-interface InvokeResult { statusCode?: number; functionError?: string; executedVersion?: string; payload: string; logTail: string }
+interface InvokeResult { statusCode?: number; functionError?: string; executedVersion?: string; payload: string; logTail: string; captured?: { group: string; stream?: string; skipped?: string }; captureError?: string }
 
 const TEMPLATES: Record<string, string> = {
   'nodejs20.x': "export const handler = async (event) => {\n  console.log('event', JSON.stringify(event));\n  return { ok: true, echo: event };\n};\n",
@@ -59,7 +59,7 @@ function FunctionDetail({ fn, onDeleted }: { fn: Fn; onDeleted: () => void }) {
   const [confirm, setConfirm] = useState(false);
   const invoke = useMutation();
   const del = useMutation();
-  const logs = useAws<{ group: string; events: { timestamp?: number; message?: string; stream?: string }[] }>('lambda', 'logs', { name: fn.FunctionName });
+  const logs = useAws<{ group: string; events: { timestamp?: number; message?: string; stream?: string; capturedByUi?: boolean }[] }>('lambda', 'logs', { name: fn.FunctionName });
 
   return (
     <ListCard
@@ -100,6 +100,13 @@ function FunctionDetail({ fn, onDeleted }: { fn: Fn; onDeleted: () => void }) {
                 <div>
                   <div className="mb-1 text-xs text-neutral-500">Log tail (last 4 KB)</div>
                   <JsonBlock value={result.logTail} maxHeight={220} />
+                  {result.captured?.stream ? (
+                    <p className="mt-1.5 text-xs text-neutral-500" data-testid="captured-note">
+                      <Pill tone="blue">Captured by UI</Pill> Copied to CloudWatch Logs <Mono>{result.captured.group}</Mono>. AWS Emulator didn&apos;t write them because, as on AWS, this function&apos;s role doesn&apos;t allow logs:CreateLogStream / logs:PutLogEvents.
+                    </p>
+                  ) : result.captureError ? (
+                    <p className="mt-1.5 text-xs text-gw-orange-700">Couldn&apos;t copy the log tail to CloudWatch: {result.captureError}</p>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -109,7 +116,7 @@ function FunctionDetail({ fn, onDeleted }: { fn: Fn; onDeleted: () => void }) {
           {logs.error ? (
             logs.error.name === 'ResourceNotFoundException' ? (
               <p className="rounded-lg border border-neutral-100 bg-neutral-25 px-4 py-3 text-sm text-neutral-600">
-                No log group for this function in the emulator yet. Use the log tail returned by Invoke above.
+                No log group yet. AWS Emulator writes <Mono>/aws/lambda/{fn.FunctionName}</Mono> on invoke when the function&apos;s role allows CloudWatch Logs; otherwise invoking from this page copies the log tail there (marked captured by UI).
               </p>
             ) : (
               <ErrorState error={logs.error} compact what="CloudWatch Logs for Lambda" />
@@ -119,6 +126,7 @@ function FunctionDetail({ fn, onDeleted }: { fn: Fn; onDeleted: () => void }) {
               {logs.data.events.map((e, i) => (
                 <div key={i} className="flex gap-3 border-b border-neutral-100 px-3 py-1.5 last:border-0">
                   <span className="shrink-0 text-neutral-500">{e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : ''}</span>
+                  {e.capturedByUi ? <Pill tone="blue" className="shrink-0">UI</Pill> : null}
                   <span className="whitespace-pre-wrap break-all text-neutral-800">{e.message}</span>
                 </div>
               ))}
@@ -156,7 +164,7 @@ function CreateFunction({ open, onClose, onCreated }: { open: boolean; onClose: 
       onClose={onClose}
       wide
       title="Create function"
-      description="Zips the code below and calls CreateFunction. The role is a placeholder; the emulator doesn't evaluate IAM policies."
+      description="Zips the code below and calls CreateFunction. Without a role ARN it uses the UI helper role (aws-emulator-ui-role), which lets the function write CloudWatch Logs."
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>

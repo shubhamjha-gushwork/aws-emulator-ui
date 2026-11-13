@@ -6,13 +6,13 @@ import { ListCard } from '@/components/ListCard';
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, InlineError } from '@/components/states';
 import { DataTable } from '@/components/table';
-import { Button, ConfirmDialog, Empty, Field, Input, JsonBlock, Modal, Mono, Pill, Segmented, Select, Spinner, StatusPill, TimeAgo } from '@/components/ui';
+import { Button, Checkbox, ConfirmDialog, Empty, Field, Input, JsonBlock, Modal, Mono, Pill, Segmented, Select, Spinner, StatusPill, TimeAgo } from '@/components/ui';
 import { useAws } from '@/components/use-aws';
 import { useMutation } from '@/components/mutate';
 
 interface Cluster { clusterArn: string; clusterName: string; status?: string; activeServicesCount?: number; runningTasksCount?: number; pendingTasksCount?: number }
 interface Service { serviceArn: string; serviceName: string; status?: string; desiredCount?: number; runningCount?: number; pendingCount?: number; launchType?: string; taskDefinition?: string }
-interface Task { taskArn: string; lastStatus?: string; desiredStatus?: string; taskDefinitionArn?: string; startedAt?: string; createdAt?: string; group?: string; launchType?: string }
+interface Task { taskArn: string; lastStatus?: string; desiredStatus?: string; taskDefinitionArn?: string; startedAt?: string; createdAt?: string; group?: string; launchType?: string; stopCode?: string; stoppedReason?: string }
 interface Network { vpcs: { id: string }[]; subnets: { id: string; vpcId: string; az: string; cidr: string }[] }
 
 const short = (arn?: string) => (arn ? arn.split('/').pop() : '');
@@ -69,7 +69,8 @@ export default function EcsPage() {
 function ClusterDetail({ c, onChanged, onDeleted }: { c: Cluster; onChanged: () => void; onDeleted: () => void }) {
   const [tab, setTab] = useState<'services' | 'tasks'>('services');
   const services = useAws<Service[]>('ecs', 'services', { cluster: c.clusterArn });
-  const tasks = useAws<Task[]>('ecs', 'tasks', { cluster: c.clusterArn });
+  const [taskStatus, setTaskStatus] = useState<'RUNNING' | 'STOPPED'>('RUNNING');
+  const tasks = useAws<Task[]>('ecs', 'tasks', { cluster: c.clusterArn, status: taskStatus });
   const [modal, setModal] = useState<'service' | 'task' | null>(null);
   const [scale, setScale] = useState<Service | null>(null);
   const [count, setCount] = useState('1');
@@ -107,10 +108,15 @@ function ClusterDetail({ c, onChanged, onDeleted }: { c: Cluster; onChanged: () 
           />
         )
       ) : tasks.error ? <ErrorState error={tasks.error} what="DescribeTasks" /> : !tasks.data ? <Spinner /> : (
+        <>
+        <div className="flex items-center gap-3 border-b border-neutral-100 px-5 py-3">
+          <Segmented value={taskStatus} onChange={setTaskStatus} options={[{ value: 'RUNNING', label: 'Running / pending' }, { value: 'STOPPED', label: 'Stopped' }]} />
+          {taskStatus === 'STOPPED' ? <span className="text-xs text-neutral-500">Most recent 100. AWS Emulator holds at most 512 tasks in total, stopped ones included, and frees them only when their cluster is deleted.</span> : null}
+        </div>
         <DataTable
           rows={tasks.data}
           rowKey={(t) => t.taskArn}
-          empty="No tasks running."
+          empty={taskStatus === 'STOPPED' ? 'No stopped tasks.' : 'No tasks running.'}
           columns={[
             { key: 'id', header: 'Task', cell: (t) => <Mono>{short(t.taskArn)}</Mono> },
             { key: 'g', header: 'Group', cell: (t) => <span className="text-neutral-600">{t.group}</span> },
@@ -118,9 +124,11 @@ function ClusterDetail({ c, onChanged, onDeleted }: { c: Cluster; onChanged: () 
             { key: 'd', header: 'Desired', cell: (t) => <StatusPill status={t.desiredStatus} /> },
             { key: 'td', header: 'Task definition', cell: (t) => <Mono>{short(t.taskDefinitionArn)}</Mono> },
             { key: 'c', header: 'Created', cell: (t) => <span className="text-neutral-500"><TimeAgo value={t.createdAt} /></span> },
+            ...(taskStatus === 'STOPPED' ? [{ key: 'why', header: 'Stopped reason', cell: (t: Task) => <span className="block max-w-md text-xs text-neutral-600" title={t.stoppedReason}>{t.stopCode ? <Pill tone="red" className="mr-1.5">{t.stopCode}</Pill> : null}{t.stoppedReason}</span> }] : []),
             { key: 'x', header: '', align: 'right', cell: (t) => (t.lastStatus === 'STOPPED' ? null : <Button size="sm" variant="ghost" onClick={() => setConfirm({ kind: 'task', t })}><LuSquare /> Stop</Button>) },
           ]}
         />
+        </>
       )}
       <Modal open={!!scale} onClose={() => setScale(null)} title={`Scale ${scale?.serviceName}`} footer={<><Button onClick={() => setScale(null)}>Cancel</Button><Button variant="primary" loading={m.busy} onClick={async () => { if (scale && (await m.run('ecs', 'scaleService', { cluster: c.clusterArn, service: scale.serviceArn, desiredCount: Number(count) }, 'Desired count updated'))) { setScale(null); reloadAll(); } }}>Update</Button></>}>
         <Field label="Desired count"><Input type="number" min={0} value={count} onChange={(e) => setCount(e.target.value)} /></Field>
@@ -178,7 +186,7 @@ function LaunchModal({ open, kind, cluster, onClose, onDone }: { open: boolean; 
       <Field label="Task definition" hint={tds.data && !tds.data.length ? 'Register a task definition first (Task definitions tab).' : undefined}>
         <Select value={tdValue} onChange={(e) => setTd(e.target.value)} options={(tds.data ?? []).map((a) => ({ value: a, label: short(a) ?? a }))} />
       </Field>
-      {kind === 'service' ? <Field label="Desired count"><Input type="number" min={0} value={desired} onChange={(e) => setDesired(e.target.value)} /></Field> : null}
+      {kind === 'service' ? <Field label="Desired count" hint="AWS Emulator stops every task after about 10 seconds, so the service keeps launching replacements. Each stopped task counts toward the emulator's 512-task limit, so scale to 0 when you're done."><Input type="number" min={0} value={desired} onChange={(e) => setDesired(e.target.value)} /></Field> : null}
       <Field label="Subnet"><Select value={subnetValue} onChange={(e) => setSubnet(e.target.value)} options={(net.data?.subnets ?? []).map((s) => ({ value: s.id, label: `${s.id} · ${s.az} · ${s.cidr}` }))} /></Field>
       <InlineError error={m.error ?? tds.error ?? net.error} />
     </Modal>
@@ -191,21 +199,43 @@ function TaskDefinitions() {
   const detail = useAws<unknown>('ecs', 'describeTaskDefinition', sel ? { taskDefinition: sel } : null);
   const [open, setOpen] = useState(false);
   const [family, setFamily] = useState('');
-  const [image, setImage] = useState('public.ecr.aws/nginx/nginx:latest');
+  const [image, setImage] = useState('public.ecr.aws/docker/library/busybox:latest');
   const [port, setPort] = useState('80');
+  const [command, setCommand] = useState('echo "hello from ECS"; date');
+  const [logs, setLogs] = useState(true);
+  const [logGroup, setLogGroup] = useState('');
+  const [confirmDereg, setConfirmDereg] = useState(false);
   const m = useMutation();
   return (
     <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.2fr)]">
       <ListCard title="Task definitions" subtitle={list.data ? `${list.data.length} revisions` : undefined} loading={list.loading} error={list.error} onReload={list.reload} hasData={!!list.data} what="ListTaskDefinitions" actions={<Button size="sm" variant="primary" onClick={() => setOpen(true)}><LuPlus /> Register</Button>}>
         <DataTable rows={list.data ?? []} rowKey={(a) => a} selectedKey={sel} onRowClick={setSel} empty="No task definitions." columns={[{ key: 'a', header: 'Family:revision', cell: (a) => <Mono>{short(a)}</Mono> }]} />
       </ListCard>
-      <ListCard title={sel ? short(sel) : 'Definition'} loading={detail.loading} error={detail.error} hasData={!!detail.data}>
+      <ListCard title={sel ? short(sel) : 'Definition'} loading={detail.loading} error={detail.error} hasData={!!detail.data} actions={sel ? <Button size="sm" variant="danger" onClick={() => setConfirmDereg(true)}><LuTrash2 /> Deregister</Button> : undefined}>
         {sel && detail.data ? <div className="p-5"><JsonBlock value={detail.data} maxHeight={560} /></div> : <Empty>Select a revision to see its JSON.</Empty>}
       </ListCard>
-      <Modal open={open} onClose={() => setOpen(false)} title="Register task definition" description="One Fargate container (256 CPU / 512 MB)." footer={<><Button onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" disabled={!family || !image} loading={m.busy} onClick={async () => { if (await m.run('ecs', 'registerTaskDefinition', { family, image, port }, `Registered ${family}`)) { setOpen(false); void list.reload(); } }}>Register</Button></>}>
+      <ConfirmDialog
+        open={confirmDereg}
+        onClose={() => setConfirmDereg(false)}
+        title={`Deregister ${short(sel ?? '')}?`}
+        description="Deregisters and deletes this revision. Running tasks keep running."
+        confirmLabel="Deregister"
+        busy={m.busy}
+        onConfirm={async () => { if (sel && (await m.run('ecs', 'deregisterTaskDefinition', { taskDefinition: sel }, 'Deregistered'))) { setConfirmDereg(false); setSel(null); void list.reload(); } }}
+      />
+      <Modal open={open} onClose={() => setOpen(false)} title="Register task definition" description="One Fargate container (256 CPU / 512 MB)." footer={<><Button onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" disabled={!family || !image} loading={m.busy} onClick={async () => { if (await m.run('ecs', 'registerTaskDefinition', { family, image, port, command: command.trim() || undefined, logs, logGroup: logGroup || undefined }, `Registered ${family}`)) { setOpen(false); void list.reload(); } }}>Register</Button></>}>
         <Field label="Family"><Input value={family} onChange={(e) => setFamily(e.target.value)} autoFocus /></Field>
         <Field label="Image"><Input value={image} onChange={(e) => setImage(e.target.value)} /></Field>
+        <Field label="Command (optional, run with sh -c)" hint="AWS Emulator runs simple shell commands (echo, sleep…) and sends their output to awslogs; it has no container runtime, so an image's own program (nginx, node, python) doesn't run. Every task stops after about 10 seconds.">
+          <Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder='echo "hello from ECS"' />
+        </Field>
         <Field label="Container port (optional)"><Input value={port} onChange={(e) => setPort(e.target.value)} /></Field>
+        <Checkbox checked={logs} onChange={setLogs} label="Send container logs to CloudWatch (awslogs driver)" />
+        {logs ? (
+          <Field label="Log group" hint="Created if missing. Uses the UI helper role as the task execution role.">
+            <Input value={logGroup} onChange={(e) => setLogGroup(e.target.value)} placeholder={`/ecs/${family || '<family>'}`} />
+          </Field>
+        ) : null}
         <InlineError error={m.error} />
       </Modal>
     </div>

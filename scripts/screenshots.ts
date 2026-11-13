@@ -105,11 +105,21 @@ async function main() {
   await page.waitForTimeout(800);
   await shot('09-stepfunctions-execution', true);
   await noAlerts('stepfunctions');
+  await page.getByRole('tab', { name: 'Steps' }).click();
+  await page.getByTestId('sfn-step').first().waitFor();
+  await page.getByTestId('sfn-step').first().scrollIntoViewIfNeeded();
+  await shot('09b-stepfunctions-steps', true);
 
   await go('/logs');
   await row(page, '/demo/app').click();
   await page.getByTestId('log-events').waitFor();
   await shot('10-logs-tail');
+  await page.getByRole('tab', { name: /^Lambda/ }).click();
+  await page.waitForTimeout(500);
+  await shot('10b-logs-filter-lambda');
+  await page.getByRole('tab', { name: /^ECS/ }).click();
+  await page.waitForTimeout(500);
+  await shot('10c-logs-filter-ecs');
 
   await go('/dynamodb');
   await row(page, 'demo-users').click();
@@ -122,11 +132,20 @@ async function main() {
   await page.waitForTimeout(800);
   await shot('12-ecs-cluster');
   await noAlerts('ecs');
+  await page.getByRole('tab', { name: /^Tasks/ }).click();
+  await page.getByRole('tab', { name: 'Stopped' }).click();
+  await page.waitForTimeout(1000);
+  await shot('12b-ecs-stopped-tasks');
 
   await go('/apigateway');
   await row(page, 'demo-rest-api').click();
   await page.waitForTimeout(800);
   await shot('13-apigateway-rest', true);
+  await page.getByPlaceholder('/items').fill('/health');
+  await page.getByTestId('test-invoke').click();
+  await page.getByTestId('invoke-result').waitFor();
+  await page.getByTestId('invoke-result').scrollIntoViewIfNeeded();
+  await shot('13b-apigateway-test-invoke', true);
   await page.getByRole('tab', { name: 'HTTP APIs (v2)' }).click();
   await page.waitForTimeout(500);
   await row(page, 'demo-http-api').click();
@@ -157,6 +176,12 @@ async function main() {
   await go('/settings');
   await page.getByText('Connected').first().waitFor();
   await shot('19-settings');
+
+  await go('/');
+  await page.getByTestId('region-picker').click();
+  await page.getByRole('listbox', { name: 'Region' }).waitFor();
+  await shot('20-region-dropdown');
+  await page.keyboard.press('Escape');
 
   await browser.close();
   writeFileSync(path.join(OUT, 'problems.json'), JSON.stringify(problems, null, 2));

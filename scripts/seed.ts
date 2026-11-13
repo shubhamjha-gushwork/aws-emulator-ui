@@ -7,10 +7,10 @@
  */
 import { createHash } from 'crypto';
 import { resolveConfig } from '../src/lib/aws';
+import { ensureHelperRole } from '../src/lib/services/iam-role';
 import { makeCtx } from '../src/lib/services/types';
 import { services } from '../src/lib/services';
 import { EC2Client, DescribeVpcsCommand, DescribeSubnetsCommand, CreateVpcCommand, CreateSubnetCommand } from '@aws-sdk/client-ec2';
-import { IAMClient, CreateRoleCommand, UpdateAssumeRolePolicyCommand } from '@aws-sdk/client-iam';
 import { ECRClient, InitiateLayerUploadCommand, UploadLayerPartCommand, CompleteLayerUploadCommand, PutImageCommand } from '@aws-sdk/client-ecr';
 
 const results: { step: string; ok: boolean; note?: string }[] = [];
@@ -32,21 +32,15 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T | undefine
 
 async function main() {
   const cfg = await resolveConfig();
-  console.log(`Seeding ${cfg.endpoint} (${cfg.region}, credentials: ${cfg.credentialSource})`);
+  console.log(`Seeding ${cfg.endpoint} (${cfg.region})`);
   const ctx = makeCtx(cfg);
   const a = (svc: string, action: string, p: Record<string, unknown> = {}) => services[svc].actions[action](ctx, p);
   const acct = '000000000000';
   const arn = (svc: string, res: string) => `arn:aws:${svc}:${cfg.region}:${acct}:${res}`;
 
   console.log('IAM');
-  // One role that Lambda, Scheduler, Step Functions and EventBridge may assume (the emulator checks trust, not permissions).
-  const trust = JSON.stringify({
-    Version: '2012-10-17',
-    Statement: [{ Effect: 'Allow', Principal: { Service: ['lambda.amazonaws.com', 'scheduler.amazonaws.com', 'states.amazonaws.com', 'events.amazonaws.com', 'ecs-tasks.amazonaws.com'] }, Action: 'sts:AssumeRole' }],
-  });
-  const iam = ctx.client(IAMClient);
-  await step('role aws-emulator-ui-role', () => iam.send(new CreateRoleCommand({ RoleName: 'aws-emulator-ui-role', AssumeRolePolicyDocument: trust })));
-  await step('role trust policy', () => iam.send(new UpdateAssumeRolePolicyCommand({ RoleName: 'aws-emulator-ui-role', PolicyDocument: trust })));
+  // One helper role that Lambda, Scheduler, Step Functions, EventBridge and ECS tasks may assume.
+  await step('role aws-emulator-ui-role (+ permissions)', () => ensureHelperRole(ctx));
 
   console.log('S3');
   await step('bucket demo-assets', () => a('s3', 'createBucket', { bucket: 'demo-assets' }));
@@ -154,9 +148,9 @@ async function main() {
 
   console.log('ECS');
   await step('cluster demo-cluster', () => a('ecs', 'createCluster', { name: 'demo-cluster' }));
-  const td = (await step('task definition demo-web', () => a('ecs', 'registerTaskDefinition', { family: 'demo-web', image: 'public.ecr.aws/nginx/nginx:latest', port: 80 }))) as { taskDefinitionArn?: string } | undefined;
+  const td = (await step('task definition demo-web', () => a('ecs', 'registerTaskDefinition', { family: 'demo-web', image: 'public.ecr.aws/docker/library/busybox:latest', port: 80, command: 'echo "hello from demo-web"; date' }))) as { taskDefinitionArn?: string } | undefined;
   if (td?.taskDefinitionArn) {
-    await step('service demo-web', () => a('ecs', 'createService', { cluster: 'demo-cluster', name: 'demo-web', taskDefinition: td.taskDefinitionArn, desiredCount: 1, subnet: subnets[0] }));
+    await step('service demo-web', () => a('ecs', 'createService', { cluster: 'demo-cluster', name: 'demo-web', taskDefinition: td.taskDefinitionArn, desiredCount: 0, subnet: subnets[0] }));
     await step('run task demo-web', () => a('ecs', 'runTask', { cluster: 'demo-cluster', taskDefinition: td.taskDefinitionArn, subnet: subnets[0] }));
   }
 
@@ -172,9 +166,14 @@ async function main() {
   // API names aren't unique on AWS, so reuse an existing demo API instead of creating duplicates on re-runs.
   const existingRest = ((await a('apigateway', 'restApis')) as { id?: string; name?: string }[]).find((x) => x.name === 'demo-rest-api');
   const rest = existingRest ?? ((await step('REST API demo-rest-api', () => a('apigateway', 'createRestApi', { name: 'demo-rest-api', description: 'Sample REST API' }))) as { id?: string } | undefined);
-  if (rest?.id && !existingRest) {
+  if (rest?.id) {
+    // (Re)applied on every run so older seeds get the MOCK integration response too.
     await step('GET /health (MOCK)', () => a('apigateway', 'addMockMethod', { id: rest.id, pathPart: 'health', method: 'GET' }));
     await step('deploy stage dev', () => a('apigateway', 'createDeployment', { id: rest.id, stage: 'dev' }));
+    await step('invoke GET /dev/health', async () => {
+      const r = (await a('apigateway', 'invoke', { id: rest.id, stage: 'dev', path: '/health' })) as { status: number; body: string };
+      if (r.status !== 200) throw new Error(`HTTP ${r.status} ${r.body}`);
+    });
   }
   const existingHttp = ((await a('apigateway', 'httpApis')) as { ApiId?: string; Name?: string }[]).find((x) => x.Name === 'demo-http-api');
   const http = existingHttp ?? ((await step('HTTP API demo-http-api', () => a('apigateway', 'createHttpApi', { name: 'demo-http-api' }))) as { ApiId?: string } | undefined);
@@ -182,6 +181,16 @@ async function main() {
     await step('route GET /items', () => a('apigateway', 'createHttpRoute', { id: http.ApiId, routeKey: 'GET /items' }));
     await step('route POST /items', () => a('apigateway', 'createHttpRoute', { id: http.ApiId, routeKey: 'POST /items' }));
     await step('stage $default', () => a('apigateway', 'createHttpStage', { id: http.ApiId, stage: '$default' }));
+  }
+  if (http?.ApiId) {
+    const routes = (await a('apigateway', 'httpRoutes', { id: http.ApiId })) as { RouteKey: string }[];
+    if (!routes.some((r) => r.RouteKey === 'GET /hello')) {
+      await step('route GET /hello → λ demo-hello', () => a('apigateway', 'createHttpRoute', { id: http.ApiId, routeKey: 'GET /hello', lambdaArn: arn('lambda', 'function:demo-hello') }));
+    }
+    await step('invoke GET /hello', async () => {
+      const r = (await a('apigateway', 'invoke', { id: http.ApiId, path: '/hello' })) as { status: number; body: string };
+      if (r.status !== 200) throw new Error(`HTTP ${r.status} ${r.body}`);
+    });
   }
 
   console.log('ECR');

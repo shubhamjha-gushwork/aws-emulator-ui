@@ -4,19 +4,18 @@ import {
   DeleteLoadBalancerCommand, CreateListenerCommand, DeleteListenerCommand, RegisterTargetsCommand, type ProtocolEnum,
 } from '@aws-sdk/client-elastic-load-balancing-v2';
 import { EC2Client, DescribeVpcsCommand, DescribeSubnetsCommand } from '@aws-sdk/client-ec2';
-import { type ServiceModule, str, optStr, num, strList, safeCount } from './types';
+import { type ServiceModule, str, optStr, num, strList, safeCount, inRegion } from './types';
 
 export const elb: ServiceModule = {
   async counts(ctx) {
-    const c = ctx.client(ElasticLoadBalancingV2Client);
     return [
-      { label: 'Load balancers', value: await safeCount(async () => (await c.send(new DescribeLoadBalancersCommand({}))).LoadBalancers?.length ?? 0) },
-      { label: 'Target groups', value: await safeCount(async () => (await c.send(new DescribeTargetGroupsCommand({}))).TargetGroups?.length ?? 0) },
+      { label: 'Load balancers', value: await safeCount(async () => ((await elb.actions.loadBalancers(ctx, {})) as unknown[]).length) },
+      { label: 'Target groups', value: await safeCount(async () => ((await elb.actions.targetGroups(ctx, {})) as unknown[]).length) },
     ];
   },
   actions: {
     async loadBalancers(ctx) {
-      return (await ctx.client(ElasticLoadBalancingV2Client).send(new DescribeLoadBalancersCommand({}))).LoadBalancers ?? [];
+      return ((await ctx.client(ElasticLoadBalancingV2Client).send(new DescribeLoadBalancersCommand({}))).LoadBalancers ?? []).filter((l) => inRegion(ctx, l.LoadBalancerArn));
     },
     async listeners(ctx, p) {
       return (await ctx.client(ElasticLoadBalancingV2Client).send(new DescribeListenersCommand({ LoadBalancerArn: str(p, 'arn') }))).Listeners ?? [];
@@ -25,7 +24,7 @@ export const elb: ServiceModule = {
       return (await ctx.client(ElasticLoadBalancingV2Client).send(new DescribeRulesCommand({ ListenerArn: str(p, 'listenerArn') }))).Rules ?? [];
     },
     async targetGroups(ctx, p) {
-      return (await ctx.client(ElasticLoadBalancingV2Client).send(new DescribeTargetGroupsCommand({ LoadBalancerArn: optStr(p, 'arn') }))).TargetGroups ?? [];
+      return ((await ctx.client(ElasticLoadBalancingV2Client).send(new DescribeTargetGroupsCommand({ LoadBalancerArn: optStr(p, 'arn') }))).TargetGroups ?? []).filter((t) => inRegion(ctx, t.TargetGroupArn));
     },
     async targetHealth(ctx, p) {
       return (await ctx.client(ElasticLoadBalancingV2Client).send(new DescribeTargetHealthCommand({ TargetGroupArn: str(p, 'targetGroupArn') }))).TargetHealthDescriptions ?? [];

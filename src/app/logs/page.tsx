@@ -10,6 +10,7 @@ import { Button, ConfirmDialog, Empty, Field, Input, Modal, Pill, Segmented, Tim
 import { callAws, toApiError, useAws } from '@/components/use-aws';
 import { useMutation } from '@/components/mutate';
 import type { ApiError } from '@/lib/errors';
+import { isUiCapturedStream, logSource, type LogSource } from '@/lib/log-sources';
 
 interface Group { logGroupName: string; arn?: string; creationTime?: number; storedBytes?: number; retentionInDays?: number }
 interface Stream { logStreamName: string; lastEventTimestamp?: number; creationTime?: number }
@@ -18,7 +19,12 @@ interface Ev { timestamp?: number; message?: string; logStreamName?: string; eve
 export default function LogsPage() {
   const [prefix, setPrefix] = useState('');
   const groups = useAws<Group[]>('logs', 'groups', { prefix });
+  const ecsGroups = useAws<string[]>('logs', 'ecsGroups');
+  const [source, setSource] = useState<'all' | LogSource>('all');
   const [sel, setSel] = useState<string | null>(null);
+  const classified = (groups.data ?? []).map((g) => ({ ...g, source: logSource(g.logGroupName, ecsGroups.data ?? []) }));
+  const count = (s: LogSource) => classified.filter((g) => g.source === s).length;
+  const shown = source === 'all' ? classified : classified.filter((g) => g.source === source);
   const [creating, setCreating] = useState(false);
   return (
     <>
@@ -26,7 +32,7 @@ export default function LogsPage() {
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.4fr)]">
         <ListCard
           title="Log groups"
-          subtitle={groups.data ? `${groups.data.length} shown` : undefined}
+          subtitle={groups.data ? `${shown.length} of ${classified.length} shown` : undefined}
           loading={groups.loading}
           error={groups.error}
           onReload={groups.reload}
@@ -34,14 +40,27 @@ export default function LogsPage() {
           what="DescribeLogGroups"
           actions={<Input className="h-8 w-40" placeholder="Prefix…" value={prefix} onChange={(e) => setPrefix(e.target.value)} />}
         >
+          <div className="border-b border-neutral-100 px-5 py-3">
+            <Segmented
+              value={source}
+              onChange={setSource}
+              options={[
+                { value: 'all', label: `All (${classified.length})` },
+                { value: 'lambda', label: `Lambda (${count('lambda')})` },
+                { value: 'ecs', label: `ECS (${count('ecs')})` },
+                { value: 'other', label: `Other (${count('other')})` },
+              ]}
+            />
+          </div>
           <DataTable
-            rows={groups.data ?? []}
+            rows={shown}
             rowKey={(g) => g.logGroupName}
             selectedKey={sel}
             onRowClick={(g) => setSel(g.logGroupName)}
-            empty="No log groups."
+            empty={source === 'all' ? 'No log groups.' : `No ${source === 'other' ? 'other' : source === 'ecs' ? 'ECS' : 'Lambda'} log groups.`}
             columns={[
               { key: 'n', header: 'Name', cell: (g) => <span className="break-all font-medium text-neutral-900">{g.logGroupName}</span> },
+              { key: 'src', header: 'Source', cell: (g) => <Pill tone={g.source === 'lambda' ? 'orange' : g.source === 'ecs' ? 'blue' : 'gray'}>{g.source === 'lambda' ? 'Lambda' : g.source === 'ecs' ? 'ECS' : 'Other'}</Pill> },
               { key: 's', header: 'Stored', align: 'right', cell: (g) => formatBytes(g.storedBytes) },
             ]}
           />
@@ -80,6 +99,7 @@ function GroupDetail({ group, onDeleted }: { group: string; onDeleted: () => voi
                 {(streams.data ?? []).map((s) => (
                   <button key={s.logStreamName} onClick={() => setStream(s.logStreamName)} className={`cursor-pointer rounded-full border px-3 py-1 text-xs font-medium transition-colors ${active === s.logStreamName ? 'border-neutral-300 bg-neutral-100 text-neutral-900' : 'border-neutral-200 bg-white text-neutral-500 hover:border-neutral-300 hover:text-neutral-700'}`}>
                     {s.logStreamName}
+                    {isUiCapturedStream(s.logStreamName) ? <span className="ml-1.5 rounded-full bg-primary-25 px-1.5 text-[10px] font-semibold text-primary-500">captured by UI</span> : null}
                   </button>
                 ))}
                 {streams.data && !streams.data.length ? <span className="text-sm text-neutral-400">No streams yet — write a test event below.</span> : null}

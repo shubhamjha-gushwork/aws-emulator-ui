@@ -2,20 +2,15 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { LuActivity, LuArrowUpRight, LuGauge, LuKeyRound, LuRefreshCw, LuServer } from 'react-icons/lu';
+import { LuActivity, LuArrowUpRight, LuGauge, LuGlobe, LuRefreshCw, LuServer } from 'react-icons/lu';
 import { useStatus } from '@/components/AppShell';
 import { SERVICE_ICONS } from '@/components/icons';
 import { Button, Card, Pill, TimeAgo } from '@/components/ui';
 import { SERVICES } from '@/lib/catalog';
+import { regionName } from '@/lib/regions';
 import { cn } from '@/lib/cn';
 
 type Overview = Record<string, { counts: { label: string; value: number }[]; ms: number }>;
-
-const credLabel: Record<string, string> = {
-  'emulator-run-files': 'Emulator run keys',
-  manual: 'Manual keys',
-  'fallback-dummy': 'Dummy keys (auth off?)',
-};
 
 export default function OverviewPage() {
   const { status, reload: reloadStatus } = useStatus(null);
@@ -41,7 +36,7 @@ export default function OverviewPage() {
     { icon: LuActivity, label: 'Emulator', value: status === null ? '…' : ok ? 'Healthy' : 'Offline', pill: status === null ? null : ok ? <Pill tone="green" dot>/__admin/health 200</Pill> : <Pill tone="red" dot>{status.health.error ?? `HTTP ${status.health.status}`}</Pill> },
     { icon: LuGauge, label: 'Health latency', value: status ? `${status.health.ms} ms` : '…', pill: null },
     { icon: LuServer, label: 'Resources', value: total === null ? '…' : total.toLocaleString(), pill: <Pill tone="blue">13 services</Pill> },
-    { icon: LuKeyRound, label: 'Credentials', value: status ? credLabel[status.credentialSource] ?? status.credentialSource : '…', pill: status ? <Pill tone={status.caLoaded ? 'green' : 'yellow'}>{status.caLoaded ? 'CA trusted' : status.tlsVerify ? 'No CA found' : 'TLS verify off'}</Pill> : null, small: true },
+    { icon: LuGlobe, label: 'Region', value: status ? regionName(status.region) : '…', pill: status ? <Pill tone="blue">{status.region}</Pill> : null, small: true },
   ];
 
   return (
@@ -89,8 +84,8 @@ export default function OverviewPage() {
         <Card className="px-6 py-5">
           <div className="font-grotesk text-lg font-medium text-neutral-900">The emulator isn&apos;t answering</div>
           <p className="mt-1 text-sm text-neutral-600">
-            Start it in a terminal with <code className="rounded bg-neutral-50 px-1.5 py-0.5 font-mono text-[12.5px]">aws-emulator</code> (Linux package) or the
-            Docker image, then refresh. The UI reads the per-run keys and CA from <code className="rounded bg-neutral-50 px-1.5 py-0.5 font-mono text-[12.5px]">{status.runDir}</code>.
+            Start it with <code className="rounded bg-neutral-50 px-1.5 py-0.5 font-mono text-[12.5px]">scripts/start-local.sh</code> (or{' '}
+            <code className="rounded bg-neutral-50 px-1.5 py-0.5 font-mono text-[12.5px]">aws-emulator</code> on Linux), then refresh.
           </p>
         </Card>
       ) : null}

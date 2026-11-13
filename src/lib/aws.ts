@@ -7,7 +7,8 @@ export interface ResolvedConfig {
   endpoint: string;
   region: string;
   credentials: { accessKeyId: string; secretAccessKey: string };
-  credentialSource: 'emulator-run-files' | 'manual' | 'fallback-dummy';
+  /** Where the SigV4 keys came from (server-side only; not shown in the UI). */
+  credentialSource: 'emulator-run-files' | 'fallback-dummy';
   caLoaded: boolean;
   tlsVerify: boolean;
   runDir: string;
@@ -18,17 +19,9 @@ export interface ResolvedConfig {
 export async function resolveConfig(settings?: Settings): Promise<ResolvedConfig> {
   const s = settings ?? (await loadSettings());
   const run = await readRunFiles(s.endpoint);
-  let credentials = { accessKeyId: s.accessKeyId, secretAccessKey: s.secretAccessKey };
-  let credentialSource: ResolvedConfig['credentialSource'] = 'manual';
-  if (s.credentialsMode === 'auto') {
-    if (run.credentials) {
-      credentials = run.credentials;
-      credentialSource = 'emulator-run-files';
-    } else {
-      credentials = { accessKeyId: 'test', secretAccessKey: 'test' };
-      credentialSource = 'fallback-dummy';
-    }
-  }
+  // Always the emulator's own per-run keys; dummy keys only if they're missing (e.g. --auth off).
+  const credentials = run.credentials ?? { accessKeyId: 'test', secretAccessKey: 'test' };
+  const credentialSource: ResolvedConfig['credentialSource'] = run.credentials ? 'emulator-run-files' : 'fallback-dummy';
   const agent = new https.Agent({
     keepAlive: true,
     ca: s.tlsVerify && run.ca ? run.ca : undefined,

@@ -1,10 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import { LuFileDown, LuPlus, LuRocket, LuTrash2 } from 'react-icons/lu';
+import { LuFileDown, LuPlay, LuPlus, LuRocket, LuTrash2 } from 'react-icons/lu';
 import { ListCard, Section } from '@/components/ListCard';
 import { PageHeader } from '@/components/PageHeader';
-import { ErrorState } from '@/components/states';
+import { ErrorState, InlineError } from '@/components/states';
 import { DataTable } from '@/components/table';
 import { Button, ConfirmDialog, Empty, Field, Input, JsonBlock, KV, Mono, Pill, Segmented, Select, TimeAgo } from '@/components/ui';
 import { callAws, toApiError, useAws } from '@/components/use-aws';
@@ -18,6 +18,41 @@ interface Deployment { id: string; description?: string; createdDate?: string }
 interface HttpApi { ApiId: string; Name: string; ProtocolType?: string; ApiEndpoint?: string; CreatedDate?: string; Description?: string }
 interface Route { RouteId: string; RouteKey: string; Target?: string; AuthorizationType?: string }
 interface Integration { IntegrationId: string; IntegrationType?: string; IntegrationUri?: string; IntegrationMethod?: string }
+
+interface InvokeResult { status: number; headers: Record<string, string>; body: string; url: string }
+
+/** Sends a request to a deployed stage through the emulator's data plane (`/_aws/execute-api/...`). */
+function TestInvoke({ apiId, stages, defaultPath, defaultMethod = 'GET' }: { apiId: string; stages: string[]; defaultPath: string; defaultMethod?: string }) {
+  const [stage, setStage] = useState('');
+  const [method, setMethod] = useState(defaultMethod);
+  const [path, setPath] = useState(defaultPath);
+  const [body, setBody] = useState('');
+  const m = useMutation();
+  const [res, setRes] = useState<InvokeResult | null>(null);
+  const stageValue = stage || stages[0] || '';
+  if (!stages.length) return <p className="text-sm text-neutral-400">Deploy a stage first to test the API.</p>;
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-end gap-2">
+        <Field label="Stage" className="w-36"><Select value={stageValue} onChange={(e) => setStage(e.target.value)} options={stages} /></Field>
+        <Field label="Method" className="w-28"><Select value={method} onChange={(e) => setMethod(e.target.value)} options={['GET', 'POST', 'PUT', 'DELETE']} /></Field>
+        <Field label="Path" className="w-56"><Input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/items" /></Field>
+        {method !== 'GET' ? <Field label="JSON body" className="min-w-48 flex-1"><Input value={body} onChange={(e) => setBody(e.target.value)} placeholder='{"name":"x"}' /></Field> : null}
+        <Button variant="primary" loading={m.busy} data-testid="test-invoke" onClick={async () => { const r = await m.run<InvokeResult>('apigateway', 'invoke', { id: apiId, stage: stageValue, method, path, body: method !== 'GET' ? body : undefined }); if (r) setRes(r); }}><LuPlay /> Send</Button>
+      </div>
+      <InlineError error={m.error} />
+      {res ? (
+        <div className="flex flex-col gap-1.5" data-testid="invoke-result">
+          <div className="flex items-center gap-2 text-xs text-neutral-500">
+            <Pill tone={res.status < 300 ? 'green' : res.status < 500 ? 'yellow' : 'red'} dot>HTTP {res.status}</Pill>
+            <Mono className="break-all">{res.url}</Mono>
+          </div>
+          <JsonBlock value={res.body || '(empty body)'} maxHeight={220} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 const methodTone = (m: string) => (m === 'GET' ? 'green' : m === 'DELETE' ? 'red' : m === 'POST' ? 'blue' : m === 'ANY' ? 'gray' : 'yellow');
 
@@ -117,6 +152,13 @@ function RestDetail({ api, onDeleted }: { api: RestApi; onDeleted: () => void })
             <Button variant="primary" disabled={!stage} loading={m.busy} onClick={async () => { if (await m.run('apigateway', 'createDeployment', { id: api.id, stage }, `Deployed to ${stage}`)) { void stages.reload(); void deployments.reload(); } }}><LuRocket /> Deploy</Button>
           </div>
         </Section>
+        <Section title="Test invoke">
+          <TestInvoke
+            apiId={api.id}
+            stages={(stages.data ?? []).map((s) => s.stageName ?? '').filter(Boolean)}
+            defaultPath={(resources.data ?? []).map((r) => r.path).filter((p) => p !== '/' && !p.includes('{')).sort()[0] ?? '/'}
+          />
+        </Section>
         <Section title={`Deployments${deployments.data ? ` (${deployments.data.length})` : ''}`}>
           {deployments.error ? <ErrorState error={deployments.error} compact what="GetDeployments" /> : (
             <div className="flex flex-col gap-1">{(deployments.data ?? []).map((d) => <div key={d.id} className="flex justify-between rounded-md border border-neutral-100 px-3 py-1.5 text-sm"><Mono>{d.id}</Mono><span className="text-neutral-500"><TimeAgo value={d.createdDate} /></span></div>)}</div>
@@ -160,6 +202,8 @@ function HttpDetail({ api, onDeleted }: { api: HttpApi; onDeleted: () => void })
   const stages = useAws<Stage[]>('apigateway', 'httpStages', { id: api.ApiId });
   const integrations = useAws<Integration[]>('apigateway', 'httpIntegrations', { id: api.ApiId });
   const [routeKey, setRouteKey] = useState('GET /items');
+  const [lambdaArn, setLambdaArn] = useState('');
+  const fns = useAws<{ FunctionName: string; FunctionArn: string }[]>('lambda', 'list');
   const [stage, setStage] = useState('$default');
   const [confirm, setConfirm] = useState<Route | 'api' | null>(null);
   const [exported, setExported] = useState<{ body?: string; error?: ApiError } | null>(null);
@@ -206,7 +250,10 @@ function HttpDetail({ api, onDeleted }: { api: HttpApi; onDeleted: () => void })
           )}
           <div className="flex items-end gap-2">
             <Field label="Route key" hint="METHOD /path, e.g. POST /orders/{id}" className="w-64"><Input value={routeKey} onChange={(e) => setRouteKey(e.target.value)} /></Field>
-            <Button disabled={!routeKey} loading={m.busy} onClick={async () => { if (await m.run('apigateway', 'createHttpRoute', { id: api.ApiId, routeKey }, `Added ${routeKey}`)) void routes.reload(); }}><LuPlus /> Add route</Button>
+            <Field label="Target" hint="Lambda proxy integration (payload 2.0)" className="w-64">
+              <Select value={lambdaArn} onChange={(e) => setLambdaArn(e.target.value)} options={[{ value: '', label: 'No integration' }, ...(fns.data ?? []).map((f) => ({ value: f.FunctionArn, label: `λ ${f.FunctionName}` }))]} aria-label="Route target" />
+            </Field>
+            <Button disabled={!routeKey} loading={m.busy} onClick={async () => { if (await m.run('apigateway', 'createHttpRoute', { id: api.ApiId, routeKey, lambdaArn: lambdaArn || undefined }, `Added ${routeKey}`)) { void routes.reload(); void integrations.reload(); } }}><LuPlus /> Add route</Button>
           </div>
         </Section>
         <Section title="Integrations">
@@ -234,6 +281,14 @@ function HttpDetail({ api, onDeleted }: { api: HttpApi; onDeleted: () => void })
             <Field label="Stage name" className="w-48"><Input value={stage} onChange={(e) => setStage(e.target.value)} /></Field>
             <Button disabled={!stage} loading={m.busy} onClick={async () => { if (await m.run('apigateway', 'createHttpStage', { id: api.ApiId, stage }, `Created stage ${stage}`)) void stages.reload(); }}><LuPlus /> Create stage</Button>
           </div>
+        </Section>
+        <Section title="Test invoke">
+          <TestInvoke
+            apiId={api.ApiId}
+            stages={(stages.data ?? []).map((s) => s.StageName ?? '').filter(Boolean)}
+            defaultPath={(routes.data ?? []).map((r) => r.RouteKey.split(' ')[1] ?? '').find((p) => p && !p.includes('{')) ?? '/'}
+            defaultMethod={(routes.data ?? [])[0]?.RouteKey.split(' ')[0]?.replace('ANY', 'GET') ?? 'GET'}
+          />
         </Section>
       </div>
       <ConfirmDialog

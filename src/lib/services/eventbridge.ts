@@ -7,15 +7,16 @@ import {
   SchedulerClient, ListSchedulesCommand, GetScheduleCommand, CreateScheduleCommand, DeleteScheduleCommand,
   ListScheduleGroupsCommand,
 } from '@aws-sdk/client-scheduler';
-import { type ServiceModule, str, optStr, json, safeCount, DEFAULT_ROLE_ARN, InputError } from './types';
+import { type ServiceModule, str, optStr, json, safeCount, InputError, inRegion } from './types';
+import { roleOrHelper } from './iam-role';
+import { grantServiceOnQueue } from './sns';
 
 export const eventbridge: ServiceModule = {
   async counts(ctx) {
     const eb = ctx.client(EventBridgeClient);
-    const sc = ctx.client(SchedulerClient);
     return [
       { label: 'Rules', value: await safeCount(async () => (await eb.send(new ListRulesCommand({}))).Rules?.length ?? 0) },
-      { label: 'Schedules', value: await safeCount(async () => (await sc.send(new ListSchedulesCommand({}))).Schedules?.length ?? 0) },
+      { label: 'Schedules', value: await safeCount(async () => ((await eventbridge.actions.schedules(ctx, {})) as unknown[]).length) },
     ];
   },
   actions: {
@@ -81,6 +82,12 @@ export const eventbridge: ServiceModule = {
     async putTarget(ctx, p) {
       const input = optStr(p, 'input');
       if (input) json(input, 'Target input');
+      const arn = str(p, 'arn');
+      // As the console does: let the rule send to an SQS target (the emulator enforces the queue policy).
+      if (arn.startsWith('arn:aws:sqs:') && p.grantQueuePolicy !== false) {
+        const rule = await ctx.client(EventBridgeClient).send(new DescribeRuleCommand({ Name: str(p, 'name'), EventBusName: optStr(p, 'bus') }));
+        if (rule.Arn) await grantServiceOnQueue(ctx, arn, 'events.amazonaws.com', rule.Arn, `AllowEvents-${rule.Name}`);
+      }
       return ctx.client(EventBridgeClient).send(
         new PutTargetsCommand({
           Rule: str(p, 'name'),
@@ -101,7 +108,7 @@ export const eventbridge: ServiceModule = {
     },
     // ---- EventBridge Scheduler
     async scheduleGroups(ctx) {
-      return (await ctx.client(SchedulerClient).send(new ListScheduleGroupsCommand({}))).ScheduleGroups ?? [];
+      return ((await ctx.client(SchedulerClient).send(new ListScheduleGroupsCommand({}))).ScheduleGroups ?? []).filter((g) => inRegion(ctx, g.Arn));
     },
     async schedules(ctx, p) {
       const c = ctx.client(SchedulerClient);
@@ -112,7 +119,7 @@ export const eventbridge: ServiceModule = {
         out.push(...(r.Schedules ?? []));
         NextToken = r.NextToken;
       } while (NextToken);
-      return out;
+      return out.filter((s) => inRegion(ctx, s.Arn));
     },
     async getSchedule(ctx, p) {
       return ctx.client(SchedulerClient).send(new GetScheduleCommand({ Name: str(p, 'name'), GroupName: optStr(p, 'group') }));
@@ -127,7 +134,7 @@ export const eventbridge: ServiceModule = {
           ScheduleExpression: str(p, 'expression'),
           FlexibleTimeWindow: { Mode: 'OFF' },
           State: 'ENABLED',
-          Target: { Arn: str(p, 'targetArn'), RoleArn: optStr(p, 'roleArn') ?? DEFAULT_ROLE_ARN, Input: input },
+          Target: { Arn: str(p, 'targetArn'), RoleArn: await roleOrHelper(ctx, optStr(p, 'roleArn')), Input: input },
         }),
       );
     },

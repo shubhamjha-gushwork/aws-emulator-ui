@@ -1,12 +1,14 @@
 'use client';
 
 import { useState } from 'react';
-import { LuPlay, LuPlus, LuSquare, LuTrash2 } from 'react-icons/lu';
+import { LuPencil, LuPlay, LuPlus, LuSquare, LuTrash2 } from 'react-icons/lu';
+import { StateGraph } from '@/components/StateGraph';
+import { useStatus } from '@/components/AppShell';
 import { ListCard, Section } from '@/components/ListCard';
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, InlineError } from '@/components/states';
 import { DataTable } from '@/components/table';
-import { Button, ConfirmDialog, Empty, Field, Input, JsonBlock, KV, Modal, Mono, Pill, Select, Spinner, StatusPill, Textarea, TimeAgo } from '@/components/ui';
+import { Button, ConfirmDialog, Empty, Field, Input, JsonBlock, KV, Modal, Mono, Pill, Segmented, Select, Spinner, StatusPill, Textarea, TimeAgo } from '@/components/ui';
 import { useAws } from '@/components/use-aws';
 import { useMutation } from '@/components/mutate';
 
@@ -14,11 +16,73 @@ interface SM { stateMachineArn: string; name: string; type?: string; creationDat
 interface Exec { executionArn: string; name: string; status: string; startDate?: string; stopDate?: string }
 interface HistEvent { id: number; type: string; timestamp?: string; previousEventId?: number; [k: string]: unknown }
 
-const SAMPLE = JSON.stringify(
-  { Comment: 'Hello world', StartAt: 'Greet', States: { Greet: { Type: 'Pass', Result: { message: 'hello' }, ResultPath: '$.greeting', Next: 'Done' }, Done: { Type: 'Succeed' } } },
-  null,
-  2,
-);
+const fnArn = (region: string, name: string) => `arn:aws:lambda:${region}:000000000000:function:${name}`;
+/** Starter definitions for the create dialog. */
+const TEMPLATES: Record<string, { label: string; def: (region: string) => object }> = {
+  hello: {
+    label: 'Hello world (Pass)',
+    def: () => ({ Comment: 'Hello world', StartAt: 'Greet', States: { Greet: { Type: 'Pass', Result: { message: 'hello' }, ResultPath: '$.greeting', Next: 'Done' }, Done: { Type: 'Succeed' } } }),
+  },
+  lambda: {
+    label: 'Invoke a Lambda',
+    def: (r) => ({
+      Comment: 'Calls demo-hello through the optimized integration, then directly by ARN',
+      StartAt: 'Invoke',
+      States: {
+        Invoke: { Type: 'Task', Resource: 'arn:aws:states:::lambda:invoke', Parameters: { FunctionName: fnArn(r, 'demo-hello'), 'Payload.$': '$' }, ResultSelector: { 'body.$': '$.Payload' }, ResultPath: '$.first', Next: 'Direct' },
+        Direct: { Type: 'Task', Resource: fnArn(r, 'demo-hello'), ResultPath: '$.second', End: true },
+      },
+    }),
+  },
+  choice: {
+    label: 'Choice + Wait',
+    def: () => ({
+      StartAt: 'Check',
+      States: {
+        Check: { Type: 'Choice', Choices: [{ Variable: '$.amount', NumericGreaterThan: 100, Next: 'Review' }], Default: 'Approve' },
+        Review: { Type: 'Wait', Seconds: 2, Next: 'Approve' },
+        Approve: { Type: 'Pass', Result: 'approved', ResultPath: '$.decision', Next: 'Done' },
+        Done: { Type: 'Succeed' },
+      },
+    }),
+  },
+  parallel: {
+    label: 'Parallel + Map',
+    def: () => ({
+      StartAt: 'Fan out',
+      States: {
+        'Fan out': {
+          Type: 'Parallel', ResultPath: '$.parallel', Next: 'Each item',
+          Branches: [
+            { StartAt: 'A', States: { A: { Type: 'Pass', Result: 'a', End: true } } },
+            { StartAt: 'B', States: { B: { Type: 'Pass', Result: 'b', End: true } } },
+          ],
+        },
+        'Each item': {
+          Type: 'Map', ItemsPath: '$.items', ResultPath: '$.mapped', End: true,
+          ItemProcessor: { ProcessorConfig: { Mode: 'INLINE' }, StartAt: 'Tag', States: { Tag: { Type: 'Pass', Parameters: { 'item.$': '$', processed: true }, End: true } } },
+        },
+      },
+    }),
+  },
+  retry: {
+    label: 'Retry + Catch',
+    def: (r) => ({
+      StartAt: 'Call',
+      States: {
+        Call: {
+          Type: 'Task', Resource: fnArn(r, 'does-not-exist'), Next: 'Done',
+          Retry: [{ ErrorEquals: ['States.ALL'], IntervalSeconds: 1, MaxAttempts: 1, BackoffRate: 1 }],
+          Catch: [{ ErrorEquals: ['States.ALL'], ResultPath: '$.error', Next: 'Recovered' }],
+        },
+        Recovered: { Type: 'Pass', Result: 'handled', ResultPath: '$.recovery', Next: 'Done' },
+        Done: { Type: 'Succeed' },
+      },
+    }),
+  },
+  fail: { label: 'Fail', def: () => ({ StartAt: 'Boom', States: { Boom: { Type: 'Fail', Error: 'OrderRejected', Cause: 'Amount over limit' } } }) },
+};
+const tpl = (key: string, region: string) => JSON.stringify(TEMPLATES[key].def(region), null, 2);
 
 export default function StepFunctionsPage() {
   const list = useAws<SM[]>('stepfunctions', 'list');
@@ -54,7 +118,12 @@ export default function StepFunctionsPage() {
 
 function MachineDetail({ sm, onDeleted }: { sm: SM; onDeleted: () => void }) {
   const desc = useAws<{ definition?: string; roleArn?: string; status?: string }>('stepfunctions', 'describe', { arn: sm.stateMachineArn });
-  const execs = useAws<Exec[]>('stepfunctions', 'executions', { arn: sm.stateMachineArn });
+  const express = sm.type === 'EXPRESS';
+  // EXPRESS executions aren't listed or described by Step Functions (as on AWS); run them synchronously instead.
+  const execs = useAws<Exec[]>('stepfunctions', 'executions', express ? null : { arn: sm.stateMachineArn });
+  const [view, setView] = useState<'steps' | 'json'>('steps');
+  const [editing, setEditing] = useState(false);
+  const [syncResult, setSyncResult] = useState<{ status?: string; output?: string; error?: string; cause?: string } | null>(null);
   const [input, setInput] = useState('{\n  "orderId": "o-1"\n}');
   const [exec, setExec] = useState<string | null>(null);
   const [confirm, setConfirm] = useState(false);
@@ -67,16 +136,48 @@ function MachineDetail({ sm, onDeleted }: { sm: SM; onDeleted: () => void }) {
     >
       <div className="flex flex-col gap-6 px-5 py-5">
         <KV items={[['Status', <StatusPill key="s" status={desc.data?.status} />], ['Role', <Mono key="r">{desc.data?.roleArn}</Mono>]]} />
-        <Section title="Definition">{desc.error ? <ErrorState error={desc.error} compact /> : desc.data ? <JsonBlock value={desc.data.definition ?? ''} maxHeight={220} /> : <Spinner />}</Section>
+        <Section
+          title="Definition"
+          actions={
+            <div className="flex items-center gap-2">
+              <Segmented value={view} onChange={setView} options={[{ value: 'steps', label: 'Steps' }, { value: 'json', label: 'JSON' }]} />
+              <Button size="sm" onClick={() => setEditing(true)} disabled={!desc.data}><LuPencil /> Edit</Button>
+            </div>
+          }
+        >
+          {desc.error ? <ErrorState error={desc.error} compact /> : desc.data ? (view === 'steps' ? <StateGraph definition={desc.data.definition ?? ''} /> : <JsonBlock value={desc.data.definition ?? ''} maxHeight={320} />) : <Spinner />}
+        </Section>
         <Section title="Start execution">
           <Textarea value={input} onChange={(e) => setInput(e.target.value)} rows={4} aria-label="Execution input" />
           <div>
-            <Button variant="primary" loading={m.busy} data-testid="start-execution" onClick={async () => { const r = await m.run<{ executionArn: string }>('stepfunctions', 'start', { arn: sm.stateMachineArn, input }, 'Execution started'); if (r) { setExec(r.executionArn); setTimeout(() => void execs.reload(), 700); } }}>
-              <LuPlay /> Start
+            <Button
+              variant="primary"
+              loading={m.busy}
+              data-testid="start-execution"
+              onClick={async () => {
+                if (express) {
+                  const r = await m.run<{ status?: string; output?: string; error?: string; cause?: string }>('stepfunctions', 'startSync', { arn: sm.stateMachineArn, input }, 'Express execution finished');
+                  if (r) setSyncResult(r);
+                  return;
+                }
+                const r = await m.run<{ executionArn: string }>('stepfunctions', 'start', { arn: sm.stateMachineArn, input }, 'Execution started');
+                if (r) { setExec(r.executionArn); setTimeout(() => void execs.reload(), 700); }
+              }}
+            >
+              <LuPlay /> {express ? 'Run (sync)' : 'Start'}
             </Button>
           </div>
           <InlineError error={m.error} />
+          {syncResult ? (
+            <div className="flex flex-col gap-1.5" data-testid="sync-result">
+              <div className="flex items-center gap-2"><StatusPill status={syncResult.status} /><span className="text-xs text-neutral-500">StartSyncExecution</span></div>
+              <JsonBlock value={syncResult.error ? `${syncResult.error}: ${syncResult.cause ?? ''}` : syncResult.output ?? ''} maxHeight={200} />
+            </div>
+          ) : null}
         </Section>
+        {express ? (
+          <p className="text-sm text-neutral-500">Express workflows don&apos;t keep an execution list or history in Step Functions; each run&apos;s result shows above.</p>
+        ) : (
         <Section title="Executions" actions={<Button size="sm" variant="ghost" onClick={execs.reload}>Refresh</Button>}>
           {execs.error ? <ErrorState error={execs.error} compact what="ListExecutions" /> : (
             <div className="overflow-hidden rounded-lg border border-neutral-100">
@@ -95,8 +196,10 @@ function MachineDetail({ sm, onDeleted }: { sm: SM; onDeleted: () => void }) {
             </div>
           )}
         </Section>
-        {exec ? <ExecutionDetail key={exec} arn={exec} onChanged={execs.reload} /> : null}
+        )}
+        {exec && !express ? <ExecutionDetail key={exec} arn={exec} onChanged={execs.reload} /> : null}
       </div>
+      {editing && desc.data ? <EditMachine arn={sm.stateMachineArn} initial={desc.data.definition ?? ''} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); void desc.reload(); }} /> : null}
       <ConfirmDialog open={confirm} onClose={() => setConfirm(false)} title={`Delete ${sm.name}?`} description="The state machine is deleted. Running executions are stopped." busy={m.busy} onConfirm={async () => { if (await m.run('stepfunctions', 'delete', { arn: sm.stateMachineArn }, `Deleted ${sm.name}`)) { setConfirm(false); onDeleted(); } }} />
     </ListCard>
   );
@@ -156,7 +259,9 @@ function ExecutionDetail({ arn, onChanged }: { arn: string; onChanged: () => voi
 function CreateMachine({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }) {
   const [name, setName] = useState('');
   const [type, setType] = useState('STANDARD');
-  const [definition, setDefinition] = useState(SAMPLE);
+  const region = useStatus(null).status?.region ?? 'us-east-1';
+  const [template, setTemplate] = useState('hello');
+  const [definition, setDefinition] = useState(() => tpl('hello', 'us-east-1'));
   const m = useMutation();
   return (
     <Modal open={open} onClose={onClose} wide title="Create state machine" footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" disabled={!name} loading={m.busy} onClick={async () => (await m.run('stepfunctions', 'create', { name, type, definition }, `Created ${name}`)) && onCreated()}>Create</Button></>}>
@@ -164,7 +269,24 @@ function CreateMachine({ open, onClose, onCreated }: { open: boolean; onClose: (
         <Field label="Name"><Input value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
         <Field label="Type"><Select value={type} onChange={(e) => setType(e.target.value)} options={['STANDARD', 'EXPRESS']} /></Field>
       </div>
+      <Field label="Start from a template">
+        <Select value={template} onChange={(e) => { setTemplate(e.target.value); setDefinition(tpl(e.target.value, region)); }} options={Object.entries(TEMPLATES).map(([value, t]) => ({ value, label: t.label }))} aria-label="Template" />
+      </Field>
       <Field label="Definition (Amazon States Language)"><Textarea value={definition} onChange={(e) => setDefinition(e.target.value)} rows={12} /></Field>
+      <InlineError error={m.error} />
+    </Modal>
+  );
+}
+
+function EditMachine({ arn, initial, onClose, onSaved }: { arn: string; initial: string; onClose: () => void; onSaved: () => void }) {
+  const [definition, setDefinition] = useState(() => {
+    try { return JSON.stringify(JSON.parse(initial), null, 2); } catch { return initial; }
+  });
+  const m = useMutation();
+  return (
+    <Modal open onClose={onClose} wide title="Edit definition" description="Saves with UpdateStateMachine. New executions use the new definition."
+      footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" loading={m.busy} onClick={async () => { if (await m.run('stepfunctions', 'update', { arn, definition }, 'State machine updated')) onSaved(); }}>Save</Button></>}>
+      <Field label="Definition (Amazon States Language)"><Textarea value={definition} onChange={(e) => setDefinition(e.target.value)} rows={16} aria-label="Definition" /></Field>
       <InlineError error={m.error} />
     </Modal>
   );

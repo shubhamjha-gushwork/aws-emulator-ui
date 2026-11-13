@@ -9,14 +9,13 @@ import { cn } from '@/lib/cn';
 import { SERVICE_ICONS } from './icons';
 import { ToastProvider } from './toast';
 import { Pill, useInterval } from './ui';
+import { RegionPicker } from './RegionPicker';
 
 export interface Status {
   endpoint: string;
   region: string;
-  credentialSource: string;
   caLoaded: boolean;
   tlsVerify: boolean;
-  runDir: string;
   health: { ok: boolean; status?: number; ms: number; error?: string };
   checkedAt: string;
 }
@@ -69,11 +68,8 @@ export function AppShell({ children }: { children: ReactNode }) {
             </div>
           </Link>
           <div className="flex items-center gap-3">
-            {status ? (
-              <span className="hidden font-mono text-xs text-neutral-500 md:inline">
-                {status.endpoint} · {status.region}
-              </span>
-            ) : null}
+            {status ? <span className="hidden font-mono text-xs text-neutral-500 xl:inline">{status.endpoint}</span> : null}
+            {status ? <RegionPicker value={status.region} /> : null}
             <Link href="/settings" data-testid="connection-pill">
               {status === null ? (
                 <Pill tone="gray" dot>Checking…</Pill>

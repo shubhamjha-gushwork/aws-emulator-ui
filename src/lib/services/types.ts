@@ -78,5 +78,22 @@ export async function safeCount(fn: () => Promise<number>): Promise<number> {
   }
 }
 
+/** The region field of an ARN (`arn:partition:service:REGION:account:resource`), or undefined. */
+export const arnRegion = (arn: string | undefined | null): string | undefined => {
+  const parts = arn?.split(':');
+  return parts && parts.length > 4 && parts[0] === 'arn' ? parts[3] || undefined : undefined;
+};
+
+/**
+ * True when the ARN belongs to the configured region (or carries no region).
+ * The emulator keeps one store per service for all regions, so several List/Describe calls return
+ * resources from every region, and some follow-up calls (e.g. ECS DescribeClusters) then reject
+ * those foreign ARNs with "Invalid Region in ARN". We scope lists to the current region like AWS does.
+ */
+export const inRegion = (ctx: Ctx, arn: string | undefined | null) => {
+  const r = arnRegion(arn);
+  return !r || r === ctx.cfg.region;
+};
+
 /** Default dummy role ARN used for create forms (the emulator does not evaluate IAM policies). */
 export const DEFAULT_ROLE_ARN = 'arn:aws:iam::000000000000:role/aws-emulator-ui-role';

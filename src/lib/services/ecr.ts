@@ -2,12 +2,11 @@ import {
   ECRClient, DescribeRepositoriesCommand, CreateRepositoryCommand, DeleteRepositoryCommand, DescribeImagesCommand,
   BatchDeleteImageCommand, GetAuthorizationTokenCommand,
 } from '@aws-sdk/client-ecr';
-import { type ServiceModule, str, bool, safeCount } from './types';
+import { type ServiceModule, str, bool, safeCount, inRegion } from './types';
 
 export const ecr: ServiceModule = {
   async counts(ctx) {
-    const c = ctx.client(ECRClient);
-    return [{ label: 'Repositories', value: await safeCount(async () => (await c.send(new DescribeRepositoriesCommand({}))).repositories?.length ?? 0) }];
+    return [{ label: 'Repositories', value: await safeCount(async () => ((await ecr.actions.list(ctx, {})) as unknown[]).length) }];
   },
   actions: {
     async list(ctx) {
@@ -19,7 +18,7 @@ export const ecr: ServiceModule = {
         out.push(...(r.repositories ?? []));
         nextToken = r.nextToken;
       } while (nextToken);
-      return out;
+      return out.filter((r) => inRegion(ctx, r.repositoryArn));
     },
     async create(ctx, p) {
       return (
