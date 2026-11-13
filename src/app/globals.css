@@ -1,0 +1,153 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:is(.dark *));
+
+/* Gushwork tokens — light only, defined on :root AND .dark so an injected .dark can't flip the UI */
+:root,
+.dark {
+  color-scheme: light;
+  --background: #ffffff;
+  --foreground: #0a0a0a;
+  --primary: #0070ff;
+  --primary-foreground: #ffffff;
+  --border: #e1e3e8;
+  --ring: #66a9ff;
+  --destructive: #dc2626;
+  --success: #10b981;
+  --muted: #f1f2f3;
+  --muted-foreground: #6a7077;
+  --radius: 0.625rem;
+  --shadow-sm: 0 1px 2px 0px hsl(0 0% 0% / 0.05), 0 1px 2px -1px hsl(0 0% 0% / 0.1);
+  --shadow-s3: 0 16px 32px -12px rgba(88, 92, 95, 0.1);
+  --shadow-s4: 0 16px 40px -8px rgba(88, 92, 95, 0.16);
+  --font-sans: var(--font-inter, ui-sans-serif), system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  /* neutral (custom) */
+  --colors-neutral-900: #262a2e;
+  --colors-neutral-800: #4d545c;
+  --colors-neutral-700: #5b6168;
+  --colors-neutral-600: #6a7077;
+  --colors-neutral-500: #878b94;
+  --colors-neutral-400: #a9acb2;
+  --colors-neutral-300: #bfc2c7;
+  --colors-neutral-200: #cfd1d4;
+  --colors-neutral-100: #e1e3e8;
+  --colors-neutral-50: #f1f2f3;
+  --colors-neutral-25: #f7f8f9;
+  /* primary */
+  --colors-primary-25: #f2f8ff;
+  --colors-primary-100: #cce2ff;
+  --colors-primary-200: #99c6ff;
+  --colors-primary-300: #66a9ff;
+  --colors-primary-400: #338cff;
+  --colors-primary-500: #0070ff;
+  --colors-primary-600: #0061e0;
+  /* status families (-100 bg / -500 dot / -700 text) */
+  --colors-gw-green-100: #d1fae5;
+  --colors-gw-green-500: #10b981;
+  --colors-gw-green-700: #047857;
+  --colors-gw-red-100: #fee2e2;
+  --colors-gw-red-500: #ef4444;
+  --colors-gw-red-700: #b91c1c;
+  --colors-gw-orange-100: #ffedd5;
+  --colors-gw-orange-500: #f97316;
+  --colors-gw-orange-700: #c2410c;
+  --colors-gw-yellow-100: #fef3c7;
+  --colors-gw-yellow-500: #f59e0b;
+  --colors-gw-yellow-700: #b45309;
+  --colors-gw-blue-100: #dbeafe;
+  --colors-gw-blue-500: #3b82f6;
+  --colors-gw-blue-700: #1d4ed8;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-25: var(--colors-primary-25);
+  --color-primary-100: var(--colors-primary-100);
+  --color-primary-200: var(--colors-primary-200);
+  --color-primary-300: var(--colors-primary-300);
+  --color-primary-400: var(--colors-primary-400);
+  --color-primary-500: var(--colors-primary-500);
+  --color-primary-600: var(--colors-primary-600);
+  --color-neutral-25: var(--colors-neutral-25);
+  --color-neutral-50: var(--colors-neutral-50);
+  --color-neutral-100: var(--colors-neutral-100);
+  --color-neutral-200: var(--colors-neutral-200);
+  --color-neutral-300: var(--colors-neutral-300);
+  --color-neutral-400: var(--colors-neutral-400);
+  --color-neutral-500: var(--colors-neutral-500);
+  --color-neutral-600: var(--colors-neutral-600);
+  --color-neutral-700: var(--colors-neutral-700);
+  --color-neutral-800: var(--colors-neutral-800);
+  --color-neutral-900: var(--colors-neutral-900);
+  --color-gw-green-100: var(--colors-gw-green-100);
+  --color-gw-green-500: var(--colors-gw-green-500);
+  --color-gw-green-700: var(--colors-gw-green-700);
+  --color-gw-red-100: var(--colors-gw-red-100);
+  --color-gw-red-500: var(--colors-gw-red-500);
+  --color-gw-red-700: var(--colors-gw-red-700);
+  --color-gw-orange-100: var(--colors-gw-orange-100);
+  --color-gw-orange-500: var(--colors-gw-orange-500);
+  --color-gw-orange-700: var(--colors-gw-orange-700);
+  --color-gw-yellow-100: var(--colors-gw-yellow-100);
+  --color-gw-yellow-500: var(--colors-gw-yellow-500);
+  --color-gw-yellow-700: var(--colors-gw-yellow-700);
+  --color-gw-blue-100: var(--colors-gw-blue-100);
+  --color-gw-blue-500: var(--colors-gw-blue-500);
+  --color-gw-blue-700: var(--colors-gw-blue-700);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+  --color-destructive: var(--destructive);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --font-sans: var(--font-sans);
+  --font-grotesk: var(--font-grotesk, var(--font-sans));
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --shadow-sm: var(--shadow-sm);
+  --shadow-s3: var(--shadow-s3);
+  --shadow-s4: var(--shadow-s4);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+@utility font-grotesk {
+  font-family: var(--font-grotesk);
+}
+@utility shadow-s3 {
+  box-shadow: var(--shadow-s3);
+}
+@utility shadow-s4 {
+  box-shadow: var(--shadow-s4);
+}
+
+@keyframes gw-pop {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.gw-pop {
+  animation: gw-pop 160ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .gw-pop {
+    animation: none;
+  }
+}

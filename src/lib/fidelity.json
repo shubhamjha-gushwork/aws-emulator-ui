@@ -1,0 +1,81 @@
+{
+ "release": "v1.0.343",
+ "scoredAt": "2026-11-13T10:36:29.182488+00:00",
+ "scores": {
+  "lambda": {
+   "pass": 404,
+   "total": 788,
+   "pct": 51.3
+  },
+  "sqs": {
+   "pass": 300,
+   "total": 335,
+   "pct": 89.6
+  },
+  "sns": {
+   "pass": 242,
+   "total": 284,
+   "pct": 85.2
+  },
+  "s3": {
+   "pass": 1031,
+   "total": 1226,
+   "pct": 84.1
+  },
+  "secretsmanager": {
+   "pass": 179,
+   "total": 220,
+   "pct": 81.4
+  },
+  "eventbridge": {
+   "pass": 242,
+   "total": 279,
+   "pct": 86.7
+  },
+  "scheduler": {
+   "pass": 103,
+   "total": 137,
+   "pct": 75.2
+  },
+  "sfn": {
+   "pass": 459,
+   "total": 589,
+   "pct": 77.9
+  },
+  "logs": {
+   "pass": 490,
+   "total": 643,
+   "pct": 76.2
+  },
+  "dynamodb": {
+   "pass": 1064,
+   "total": 1481,
+   "pct": 71.8
+  },
+  "ecs": {
+   "pass": 367,
+   "total": 598,
+   "pct": 61.4
+  },
+  "apigateway": {
+   "pass": 605,
+   "total": 780,
+   "pct": 77.6
+  },
+  "apigatewayv2": {
+   "pass": 159,
+   "total": 277,
+   "pct": 57.4
+  },
+  "elbv2": {
+   "pass": 278,
+   "total": 414,
+   "pct": 67.1
+  },
+  "ecr": {
+   "pass": 251,
+   "total": 288,
+   "pct": 87.2
+  }
+ }
+}
