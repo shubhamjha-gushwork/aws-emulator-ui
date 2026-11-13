@@ -302,7 +302,7 @@ async function main() {
 
   // ECR
   const repo = P.replace('-', '/');
-  await check('ecr', 'create repository', () => call('ecr', 'create', { name: repo, scanOnPush: true }));
+  await check('ecr', 'create repository', () => call('ecr', 'create', { name: repo }));
   await check('ecr', 'list images', () => call('ecr', 'images', { name: repo }));
   await check('ecr', 'auth token', () => call('ecr', 'authToken'));
   await check('ecr', 'images of seeded demo/web', async () => { const i = await call<unknown[]>('ecr', 'images', { name: 'demo/web' }); if (!i.length) throw new Error('no images (run npm run seed)'); });

@@ -194,7 +194,7 @@ async function main() {
   }
 
   console.log('ECR');
-  await step('repository demo/web', () => a('ecr', 'create', { name: 'demo/web', scanOnPush: true }));
+  await step('repository demo/web', () => a('ecr', 'create', { name: 'demo/web' }));
   await step('repository demo/worker', () => a('ecr', 'create', { name: 'demo/worker' }));
   await step('push sample image demo/web:latest', async () => {
     const ecr = ctx.client(ECRClient);

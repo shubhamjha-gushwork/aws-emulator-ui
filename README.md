@@ -244,7 +244,7 @@ All 13 services are implemented in the emulator (crates under `services/`) and w
 | API Gateway REST (v1) | MOCK methods get a 200 method/integration response. Use **Test invoke** on an API to call it through the emulator's data plane (`/_aws/execute-api/{id}/{stage}/{path}`). |
 | API Gateway HTTP (v2) | Routes can target a Lambda (AWS_PROXY, payload 2.0). **`ExportApi` is NotImplemented** and shows the not-supported state. |
 | ELBv2 | IP targets must sit inside the VPC CIDR (172.31.0.0/16). |
-| ECR | `docker push` to the emulator fails with `error from registry: the operation is unsupported` (login works). Push with `npm run ecr-push -- <local-image> <repo>:<tag>`, which uses the ECR layer APIs. **Scan on push** is saved but no scan runs on push (`DescribeImageScanFindings` → `ScanNotFoundException`). **Scan** in the image list calls `StartImageScan`: it completes with 0 findings even for old images such as `alpine:3.12` (the emulator has no vulnerability database), and fails with `UnsupportedImageError` for images without an OS layer. |
+| ECR | `docker push` to the emulator fails with `error from registry: the operation is unsupported` (login works). Push with `npm run ecr-push -- <local-image> <repo>:<tag>`, which uses the ECR layer APIs. Image scanning isn't offered: the emulator doesn't scan on push and has no vulnerability database. |
 
 ### CloudWatch Logs from Lambda and ECS
 

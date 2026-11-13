@@ -1,6 +1,6 @@
 import {
   ECRClient, DescribeRepositoriesCommand, CreateRepositoryCommand, DeleteRepositoryCommand, DescribeImagesCommand,
-  BatchDeleteImageCommand, GetAuthorizationTokenCommand, DescribeImageScanFindingsCommand, StartImageScanCommand,
+  BatchDeleteImageCommand, GetAuthorizationTokenCommand,
 } from '@aws-sdk/client-ecr';
 import { type ServiceModule, str, bool, safeCount, inRegion } from './types';
 
@@ -23,7 +23,7 @@ export const ecr: ServiceModule = {
     async create(ctx, p) {
       return (
         await ctx.client(ECRClient).send(
-          new CreateRepositoryCommand({ repositoryName: str(p, 'name'), imageTagMutability: bool(p, 'immutable') ? 'IMMUTABLE' : 'MUTABLE', imageScanningConfiguration: { scanOnPush: bool(p, 'scanOnPush') } }),
+          new CreateRepositoryCommand({ repositoryName: str(p, 'name'), imageTagMutability: bool(p, 'immutable') ? 'IMMUTABLE' : 'MUTABLE' }),
         )
       ).repository;
     },
@@ -33,20 +33,6 @@ export const ecr: ServiceModule = {
     },
     async images(ctx, p) {
       return (await ctx.client(ECRClient).send(new DescribeImagesCommand({ repositoryName: str(p, 'name') }))).imageDetails ?? [];
-    },
-    /** Scan status + findings of one image; NOT_SCANNED when the emulator has no scan for it (ScanNotFoundException). */
-    async scanFindings(ctx, p) {
-      try {
-        const r = await ctx.client(ECRClient).send(new DescribeImageScanFindingsCommand({ repositoryName: str(p, 'name'), imageId: { imageDigest: str(p, 'digest') }, maxResults: 100 }));
-        return { status: r.imageScanStatus?.status ?? 'UNKNOWN', description: r.imageScanStatus?.description, completedAt: r.imageScanFindings?.imageScanCompletedAt, severityCounts: r.imageScanFindings?.findingSeverityCounts ?? {}, findings: r.imageScanFindings?.findings ?? [] };
-      } catch (e) {
-        if ((e as Error).name === 'ScanNotFoundException') return { status: 'NOT_SCANNED', severityCounts: {}, findings: [] };
-        throw e;
-      }
-    },
-    async startScan(ctx, p) {
-      const r = await ctx.client(ECRClient).send(new StartImageScanCommand({ repositoryName: str(p, 'name'), imageId: { imageDigest: str(p, 'digest') } }));
-      return { status: r.imageScanStatus?.status, description: r.imageScanStatus?.description };
     },
     async deleteImage(ctx, p) {
       return ctx.client(ECRClient).send(new BatchDeleteImageCommand({ repositoryName: str(p, 'name'), imageIds: [{ imageDigest: str(p, 'digest') }] }));
