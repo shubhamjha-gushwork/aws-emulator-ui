@@ -8,10 +8,36 @@ It covers **13 services**: Lambda, SQS, SNS, S3, Secrets Manager, EventBridge (+
 CloudWatch Logs, DynamoDB, ECS, API Gateway (REST v1 + HTTP v2), Elastic Load Balancing v2 and ECR.
 Each service page lists resources, shows details and supports basic create / delete (with confirm dialogs)
 plus the everyday actions (invoke, send/receive, publish, upload/download, put events, start execution,
-tail logs, scan, run task, scale, export, register target, …).
+tail logs, DynamoDB scan, run task, scale, export, register target, …).
 
 If the emulator answers `NotImplemented` for something, the UI shows an orange
 **"Not supported by AWS Emulator yet"** state. It never fakes data.
+
+## Screenshots
+
+**Overview:** emulator health, resource counts per service, and the current region.
+
+![Overview](docs/screenshots/overview.webp)
+
+**Region menu:** pick the region in the top bar, as in the AWS console. Every page follows it.
+
+![Region menu](docs/screenshots/region-menu.webp)
+
+**CloudWatch Logs:** all log groups, filtered by source (Lambda, ECS, Other) or by prefix.
+
+![Log groups](docs/screenshots/logs-groups.webp)
+
+**Log group:** one page to filter, pick a stream and time range, and follow new events live.
+
+![Log group](docs/screenshots/log-group.webp)
+
+**ECS cluster:** services and tasks of a cluster, with launch, scale and delete.
+
+![ECS cluster](docs/screenshots/ecs-cluster.webp)
+
+**Step Functions:** the state machine's steps, its executions, and the event history of a run.
+
+![Step Functions](docs/screenshots/step-functions.webp)
 
 ## Startup guide (macOS)
 
