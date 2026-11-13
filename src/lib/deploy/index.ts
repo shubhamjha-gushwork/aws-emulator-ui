@@ -59,12 +59,12 @@ async function run(opts: DeployOptions, dry: boolean): Promise<RunResult> {
     if (cfg.kind === 'serverless') {
       const parsed = parseServerlessFile(cfg.file, { stage: opts.stage, region: opts.region, env });
       if (dry) {
-        plans.push(annotatePlan(planServerless(parsed), loaded.env));
+        plans.push(annotatePlan(planServerless(parsed, { noRun: opts.noRun }), loaded.env));
         continue;
       }
       const id = manifestId(parsed.service, parsed.stage, 'serverless', path.relative(opts.source, cfg.file) || parsed.service);
       const existing = readManifest(id);
-      const { plan, manifest } = await applyServerless(clients!, parsed, { dryRun: false, id, source: sourceLabel, fileEnv: loaded.env });
+      const { plan, manifest } = await applyServerless(clients!, parsed, { dryRun: false, id, source: sourceLabel, fileEnv: loaded.env, noRun: opts.noRun });
       if (manifest) {
         if (existing) manifest.createdAt = existing.createdAt;
         writeManifest(manifest);
@@ -74,7 +74,7 @@ async function run(opts: DeployOptions, dry: boolean): Promise<RunResult> {
     } else {
       const parsed = parseTrinityFile(cfg.file, { stage: opts.stage, region: opts.region, env });
       if (dry) {
-        plans.push(annotatePlan(planTrinity(parsed), loaded.env));
+        plans.push(annotatePlan(planTrinity(parsed, { noRun: opts.noRun }), loaded.env));
         continue;
       }
       const id = manifestId(parsed.name, parsed.stage, 'trinity', path.relative(opts.source, cfg.file) || parsed.name);
@@ -86,6 +86,7 @@ async function run(opts: DeployOptions, dry: boolean): Promise<RunResult> {
         id,
         source: sourceLabel,
         fileEnv: loaded.env,
+        noRun: opts.noRun,
       });
       if (manifest) {
         if (existing) manifest.createdAt = existing.createdAt;
@@ -115,10 +116,10 @@ function runSyncPlan(opts: DeployOptions): RunResult {
   for (const cfg of configs) {
     if (cfg.kind === 'serverless') {
       const parsed = parseServerlessFile(cfg.file, { stage: opts.stage, region: opts.region, env });
-      plans.push(annotatePlan(planServerless(parsed), loaded.env));
+      plans.push(annotatePlan(planServerless(parsed, { noRun: opts.noRun }), loaded.env));
     } else {
       const parsed = parseTrinityFile(cfg.file, { stage: opts.stage, region: opts.region, env });
-      plans.push(annotatePlan(planTrinity(parsed), loaded.env));
+      plans.push(annotatePlan(planTrinity(parsed, { noRun: opts.noRun }), loaded.env));
     }
   }
   return { configs, plans, manifests: [], envFile: loaded.path };

@@ -3,6 +3,7 @@ import path from 'path';
 import { collectSecrets, createCtx, interpolateTree, type InterpCtx, type SecretBag } from '../interpolate';
 import { loadYaml } from '../yaml';
 import { type Plan, type PlannedResource, uiHref, type ResourceKind } from '../types';
+import { noRunDetail } from '../run-mode';
 
 export interface SlsHttpEvent {
   method: string;
@@ -271,7 +272,7 @@ function normalizeLogical(name: string): string {
   return name.replace(/[^A-Za-z0-9]/g, '');
 }
 
-export function planServerless(parsed: ParsedServerless): Plan {
+export function planServerless(parsed: ParsedServerless, opts: { noRun?: boolean } = {}): Plan {
   const resources: PlannedResource[] = [];
   const add = (kind: ResourceKind, name: string, detail?: string) => {
     resources.push({ kind, name, action: 'create', detail, href: uiHref(kind, name) });
@@ -288,7 +289,7 @@ export function planServerless(parsed: ParsedServerless): Plan {
     add(kind, name, r.Type);
   }
   for (const q of parsed.liftQueues) {
-    add('sqs', q.queueName, q.fifo ? 'FIFO lift queue + DLQ + worker' : 'lift queue + DLQ + worker');
+    add('sqs', q.queueName, noRunDetail(!!opts.noRun, q.fifo ? 'FIFO lift queue + DLQ + worker' : 'lift queue + DLQ + worker'));
     if (q.worker.handler || q.worker.image) add('lambda', `${parsed.service}-${parsed.stage}-${q.name}Worker`, 'lift worker');
   }
   for (const fn of parsed.functions) {
@@ -298,11 +299,11 @@ export function planServerless(parsed: ParsedServerless): Plan {
       if (ev.httpApi) add('apigatewayv2', `${parsed.service}-${parsed.stage}-http`, `${ev.httpApi.method.toUpperCase()} ${ev.httpApi.path}`);
       if (ev.schedule) {
         const rate = typeof ev.schedule === 'string' ? ev.schedule : ev.schedule.rate;
-        add('event-rule', `${fn.deployedName}-schedule`, rate);
+        add('event-rule', `${fn.deployedName}-schedule`, noRunDetail(!!opts.noRun, rate));
       }
-      if (ev.sqs) add('event-source-mapping', `${fn.deployedName} ← ${typeof ev.sqs.arn === 'string' ? ev.sqs.arn : JSON.stringify(ev.sqs.arn)}`, 'SQS trigger');
-      if (ev.s3) add('s3', ev.s3.bucket, ev.s3.event);
-      if (ev.eventBridge) add('event-rule', `${fn.deployedName}-eb`, 'EventBridge');
+      if (ev.sqs) add('event-source-mapping', `${fn.deployedName} ← ${typeof ev.sqs.arn === 'string' ? ev.sqs.arn : JSON.stringify(ev.sqs.arn)}`, noRunDetail(!!opts.noRun, 'SQS trigger'));
+      if (ev.s3) add('s3', ev.s3.bucket, opts.noRun ? `${ev.s3.event} · notification skipped (--no-run)` : ev.s3.event);
+      if (ev.eventBridge) add('event-rule', `${fn.deployedName}-eb`, noRunDetail(!!opts.noRun, 'EventBridge'));
       if (ev.sns) add('sns', String(ev.sns), 'SNS trigger (best-effort)');
       if (ev.other) parsed.unsupported.push(`event type "${ev.other}" on ${fn.name} is not created`);
       if (ev.http?.authorizer || ev.httpApi?.authorizer) parsed.unsupported.push(`authorizer on ${fn.name} is not attached`);

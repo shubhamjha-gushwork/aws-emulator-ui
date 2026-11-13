@@ -23,6 +23,7 @@ Options:
   --endpoint <url>       Floci endpoint (default: http://127.0.0.1:4566)
   --dry-run              Print the plan; do not create anything
   --no-build             Skip docker build/push (Trinity)
+  --no-run               Create only: disable triggers, ECS desiredCount 0
   --desired-count <n>    Override ECS desiredCount (Trinity services)
   --kind serverless|trinity
                          Only configs of this kind when a directory has both
@@ -60,6 +61,7 @@ function parseArgs(argv: string[]) {
     if (a === '-h' || a === '--help') usage(0);
     if (a === '--dry-run') opts.dryRun = true;
     else if (a === '--no-build') opts.noBuild = true;
+    else if (a === '--no-run') opts.noRun = true;
     else if (a === '--write-example') {
       const peek = args[0];
       if (peek && !peek.startsWith('--')) opts['write-example'] = args.shift()!;
@@ -109,6 +111,7 @@ async function main() {
     endpoint: String(opts.endpoint || base.endpoint),
     dryRun: Boolean(opts.dryRun) || cmd === 'plan',
     noBuild: Boolean(opts.noBuild),
+    noRun: Boolean(opts.noRun),
     desiredCount: opts['desired-count'] ? Number(opts['desired-count']) : undefined,
     kind: opts.kind === 'serverless' || opts.kind === 'trinity' ? opts.kind : undefined,
     envFile: typeof opts['env-file'] === 'string' ? String(opts['env-file']) : undefined,

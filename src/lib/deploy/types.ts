@@ -34,6 +34,8 @@ export interface DeployOptions {
   kind?: ConfigKind;
   /** Path to a local .env / .env.local used to fill placeholder secrets. Never sent to real AWS. */
   envFile?: string;
+  /** Create resources but do not start work: disabled triggers, ECS desiredCount 0. */
+  noRun?: boolean;
 }
 
 export interface PlannedResource {

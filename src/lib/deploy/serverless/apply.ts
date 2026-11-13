@@ -23,6 +23,7 @@ import { resourceTags } from '../client';
 import { PLACEHOLDER_VALUE, uiHref, type DeployManifest, type ManifestResource, type Plan } from '../types';
 import { collectSecrets } from '../interpolate';
 import { buildSecretPayload, fillPlaceholderEnv, type EnvMap } from '../envfile';
+import { triggerEnabled, triggerState } from '../run-mode';
 import { packageFunction } from './package';
 import type { ParsedServerless, SlsFunction } from './parse';
 import { planServerless } from './parse';
@@ -32,9 +33,9 @@ const ROLE = 'arn:aws:iam::000000000000:role/aws-emulator-ui-role';
 export async function applyServerless(
   clients: DeployClients,
   parsed: ParsedServerless,
-  opts: { dryRun: boolean; id: string; source: string; fileEnv?: EnvMap },
+  opts: { dryRun: boolean; id: string; source: string; fileEnv?: EnvMap; noRun?: boolean },
 ): Promise<{ plan: Plan; manifest?: DeployManifest }> {
-  const plan = planServerless(parsed);
+  const plan = planServerless(parsed, { noRun: opts.noRun });
   if (opts.dryRun) return { plan };
 
   const tags = resourceTags({ id: opts.id, stage: parsed.stage, kind: 'serverless', service: parsed.service, source: opts.source });
@@ -141,14 +142,14 @@ export async function applyServerless(
       if (ev.schedule) {
         const rate = typeof ev.schedule === 'string' ? ev.schedule : ev.schedule.rate;
         const rule = `${fn.deployedName}-schedule`;
-        await clients.events.send(new PutRuleCommand({ Name: rule, ScheduleExpression: rate, State: 'ENABLED' }));
+        await clients.events.send(new PutRuleCommand({ Name: rule, ScheduleExpression: rate, State: triggerState(!!opts.noRun) }));
         await clients.events.send(new PutTargetsCommand({ Rule: rule, Targets: [{ Id: 'fn', Arn: arn }] }));
         resources.push({ kind: 'event-rule', name: rule, href: uiHref('event-rule') });
       }
       if (ev.sqs) {
         const srcArn = resolveArn(ev.sqs.arn, logical);
         if (srcArn && !srcArn.includes('Fn::') && !srcArn.includes('${')) {
-          await upsertMapping(clients, arn, srcArn, ev.sqs.batchSize, ev.sqs.maximumConcurrency);
+          await upsertMapping(clients, arn, srcArn, ev.sqs.batchSize, ev.sqs.maximumConcurrency, !!opts.noRun);
           resources.push({ kind: 'event-source-mapping', name: `${fn.deployedName}`, arn: srcArn, href: uiHref('event-source-mapping') });
         } else {
           plan.warnings.push(`${fn.name}: could not resolve SQS arn ${ev.sqs.arn}`);
@@ -156,10 +157,14 @@ export async function applyServerless(
       }
       if (ev.s3 && ev.s3.bucket) {
         await upsertBucket(clients, ev.s3.bucket);
-        await clients.s3.send(new PutBucketNotificationConfigurationCommand({
-          Bucket: ev.s3.bucket,
-          NotificationConfiguration: { LambdaFunctionConfigurations: [{ Events: [(ev.s3.event || 's3:ObjectCreated:*') as 's3:ObjectCreated:*'], LambdaFunctionArn: arn }] },
-        })).catch((e) => plan.warnings.push(`${fn.name}: S3 notification failed (${(e as Error).message})`));
+        if (opts.noRun) {
+          plan.warnings.push(`${fn.name}: S3 notification on ${ev.s3.bucket} skipped (--no-run)`);
+        } else {
+          await clients.s3.send(new PutBucketNotificationConfigurationCommand({
+            Bucket: ev.s3.bucket,
+            NotificationConfiguration: { LambdaFunctionConfigurations: [{ Events: [(ev.s3.event || 's3:ObjectCreated:*') as 's3:ObjectCreated:*'], LambdaFunctionArn: arn }] },
+          })).catch((e) => plan.warnings.push(`${fn.name}: S3 notification failed (${(e as Error).message})`));
+        }
         resources.push({ kind: 's3', name: ev.s3.bucket, href: uiHref('s3') });
       }
       if (ev.eventBridge) {
@@ -170,7 +175,7 @@ export async function applyServerless(
           Name: name,
           EventBusName: bus,
           EventPattern: pattern ? JSON.stringify(pattern) : undefined,
-          State: 'ENABLED',
+          State: triggerState(!!opts.noRun),
         }));
         await clients.events.send(new PutTargetsCommand({ Rule: name, EventBusName: bus, Targets: [{ Id: 'fn', Arn: arn }] }));
         resources.push({ kind: 'event-rule', name, href: uiHref('event-rule') });
@@ -325,14 +330,15 @@ async function upsertLambda(c: DeployClients, p: { name: string; runtime: string
   }
 }
 
-async function upsertMapping(c: DeployClients, fnArn: string, sourceArn: string, batchSize?: number, maxConcurrency?: number) {
+async function upsertMapping(c: DeployClients, fnArn: string, sourceArn: string, batchSize?: number, maxConcurrency?: number, noRun = false) {
+  const enabled = triggerEnabled(noRun);
   const existing = await c.lambda.send(new ListEventSourceMappingsCommand({ FunctionName: fnArn, EventSourceArn: sourceArn }));
   if (existing.EventSourceMappings?.[0]?.UUID) {
     await c.lambda.send(new UpdateEventSourceMappingCommand({
       UUID: existing.EventSourceMappings[0].UUID,
       BatchSize: batchSize,
       ScalingConfig: maxConcurrency ? { MaximumConcurrency: maxConcurrency } : undefined,
-      Enabled: true,
+      Enabled: enabled,
     })).catch(() => undefined);
     return;
   }
@@ -341,7 +347,7 @@ async function upsertMapping(c: DeployClients, fnArn: string, sourceArn: string,
     EventSourceArn: sourceArn,
     BatchSize: batchSize ?? 1,
     ScalingConfig: maxConcurrency ? { MaximumConcurrency: maxConcurrency } : undefined,
-    Enabled: true,
+    Enabled: enabled,
   }));
 }
 

@@ -3,6 +3,7 @@ import path from 'path';
 import { collectSecrets, createCtx, interpolateTree, promoteSecretsManagerRefs, type InterpCtx } from '../interpolate';
 import { loadYaml } from '../yaml';
 import { type Plan, type PlannedResource, type ResourceKind, uiHref } from '../types';
+import { noRunDetail, serviceDesiredCount } from '../run-mode';
 
 export type TrinityStackKind = 'HTTPApi' | 'Fargate' | 'ScheduledFargate' | string;
 
@@ -152,7 +153,7 @@ function taskFrom(task: Record<string, unknown>, base: { envVars: Record<string,
   };
 }
 
-export function planTrinity(parsed: ParsedTrinity): Plan {
+export function planTrinity(parsed: ParsedTrinity, opts: { noRun?: boolean } = {}): Plan {
   const resources: PlannedResource[] = [];
   const add = (kind: ResourceKind, name: string, detail?: string) => {
     resources.push({ kind, name, action: 'create', detail, href: uiHref(kind, name) });
@@ -165,9 +166,9 @@ export function planTrinity(parsed: ParsedTrinity): Plan {
       add('ecr', `aws-emulator/${parsed.stage}/${t.name}`, t.dockerfile ? `build ${t.dockerfile}` : t.handler ? `generated image from ${t.handler}` : 'image');
       add('ecs-task-definition', `${t.name}-${parsed.stage}`, `cpu ${t.cpu ?? 256} / mem ${t.memory ?? 512}`);
       if (t.schedule) {
-        add('scheduler', `${t.name}-${parsed.stage}`, t.schedule);
+        add('scheduler', `${t.name}-${parsed.stage}`, noRunDetail(!!opts.noRun, t.schedule));
       } else {
-        add('ecs-service', t.name, `desiredCount ${t.desiredCount ?? 1}`);
+        add('ecs-service', t.name, `desiredCount ${serviceDesiredCount(!!opts.noRun, undefined, t.desiredCount)}`);
       }
       if (stack.kind === 'HTTPApi' || t.appPort) {
         add('target-group', `${t.name}-tg`, t.albHealthCheckPath || t.healthCheckPath || '/');

@@ -118,7 +118,7 @@ npx aws-emulator list
 npx aws-emulator destroy /path/to/service          # or a deployment id from `list`
 ```
 
-Options: `--stage` (default `local`), `--region` (default `us-east-1` or the UI setting), `--endpoint`, `--dry-run`, `--no-build` (skip Docker build/push for Trinity), `--desired-count N`, `--kind serverless|trinity`, `--env-file <path>`.
+Options: `--stage` (default `local`), `--region` (default `us-east-1` or the UI setting), `--endpoint`, `--dry-run`, `--no-build` (skip Docker build/push for Trinity), `--no-run` (create only: EventBridge/Scheduler rules are DISABLED, SQS/stream mappings are disabled, S3 notifications are skipped, ECS `desiredCount` is 0), `--desired-count N`, `--kind serverless|trinity`, `--env-file <path>`.
 
 ### Filling secrets from a local .env
 

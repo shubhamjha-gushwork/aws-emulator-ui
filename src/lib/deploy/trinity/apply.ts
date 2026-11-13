@@ -19,15 +19,16 @@ import { buildSecretPayload, fillPlaceholderEnv, type EnvMap } from '../envfile'
 import { uiHref, type DeployManifest, type ManifestResource, type Plan } from '../types';
 import { planTrinity, type ParsedTrinity, type TrinityTask } from './parse';
 import { fitFargateResources } from './fargate';
+import { serviceDesiredCount, triggerState } from '../run-mode';
 
 const ROLE = 'arn:aws:iam::000000000000:role/aws-emulator-ui-role';
 
 export async function applyTrinity(
   clients: DeployClients,
   parsed: ParsedTrinity,
-  opts: { dryRun: boolean; noBuild: boolean; desiredCount?: number; id: string; source: string; fileEnv?: EnvMap },
+  opts: { dryRun: boolean; noBuild: boolean; desiredCount?: number; id: string; source: string; fileEnv?: EnvMap; noRun?: boolean },
 ): Promise<{ plan: Plan; manifest?: DeployManifest }> {
-  const plan = planTrinity(parsed);
+  const plan = planTrinity(parsed, { noRun: opts.noRun });
   if (opts.dryRun) return { plan };
 
   const tags = resourceTags({ id: opts.id, stage: parsed.stage, kind: 'trinity', service: parsed.name, source: opts.source });
@@ -98,7 +99,7 @@ export async function applyTrinity(
 
       if (task.schedule) {
         const rule = `${family}-schedule`;
-        await clients.events.send(new PutRuleCommand({ Name: rule, ScheduleExpression: task.schedule, State: 'ENABLED' }));
+        await clients.events.send(new PutRuleCommand({ Name: rule, ScheduleExpression: task.schedule, State: triggerState(!!opts.noRun) }));
         await clients.events.send(new PutTargetsCommand({
           Rule: rule,
           Targets: [{
@@ -115,7 +116,7 @@ export async function applyTrinity(
         })).catch((e) => plan.warnings.push(`${task.name}: schedule target failed (${(e as Error).message})`));
         resources.push({ kind: 'scheduler', name: rule, href: uiHref('scheduler') });
       } else {
-        const desired = opts.desiredCount ?? task.desiredCount ?? 1;
+        const desired = serviceDesiredCount(!!opts.noRun, opts.desiredCount, task.desiredCount);
         const serviceName = task.name;
         let loadBalancers: { targetGroupArn: string; containerName: string; containerPort: number }[] | undefined;
         if ((stack.kind === 'HTTPApi' || port) && port && net.subnets.length) {
