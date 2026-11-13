@@ -3,8 +3,8 @@ import { rewriteSfn } from '@/lib/deploy/serverless/apply';
 
 describe('rewriteSfn', () => {
   const fnArns = {
-    CreateAirtableBase: 'arn:aws:lambda:us-east-1:000000000000:function:gw-backend-stormbreaker-local-CreateAirtableBase',
-    ProcessCleanup: 'arn:aws:lambda:us-east-1:000000000000:function:gw-backend-stormbreaker-local-ProcessCleanup',
+    CreateAirtableBase: 'arn:aws:lambda:us-east-1:000000000000:function:sample-api-local-CreateThing',
+    ProcessCleanup: 'arn:aws:lambda:us-east-1:000000000000:function:sample-api-local-ProcessCleanup',
   };
 
   it('rewrites Fn::GetAtt Resources to Lambda ARNs but leaves StartAt/Next state names alone', () => {
