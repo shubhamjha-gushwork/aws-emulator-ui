@@ -105,8 +105,15 @@ async function zipPython(parsed: ParsedServerless, fn: SlsFunction, zipPath: str
   // Best-effort: zip source excluding heavy dirs. Dependencies (requirements) are not installed
   // unless a .requirements or existing site-packages is clearly project-local — we skip that to
   // avoid pulling secrets or huge trees.
-  const files = listSource(parsed.root, parsed.packagePatterns?.patterns, parsed.packagePatterns?.exclude);
+  const files = selectPackageFiles(parsed.root, parsed.packagePatterns);
   zipFiles(parsed.root, zipPath, files);
+  const size = fs.statSync(zipPath).size;
+  if (size > 50 * 1024 * 1024) {
+    throw new Error(
+      `${fn.name}: package zip is ${Math.round(size / (1024 * 1024))} MB, over Lambda's 50 MB upload limit. ` +
+        `Tighten package.patterns / package.exclude so only handler source is included.`,
+    );
+  }
 }
 
 function resolveHandlerFile(root: string, handler: string): string {
@@ -138,35 +145,73 @@ function findEsbuild(root: string): string | undefined {
   return undefined;
 }
 
-function listSource(root: string, patterns?: string[], exclude?: string[]): string[] {
+export function selectPackageFiles(
+  root: string,
+  pkg?: { include?: string[]; exclude?: string[]; patterns?: string[] },
+): string[] {
+  const patterns: string[] = [];
+  for (const p of pkg?.include ?? []) if (p) patterns.push(p);
+  for (const p of pkg?.exclude ?? []) {
+    if (!p) continue;
+    patterns.push(p.startsWith('!') ? p : `!${p}`);
+  }
+  for (const p of pkg?.patterns ?? []) if (p) patterns.push(p);
+  return listSource(root, patterns);
+}
+
+function listSource(root: string, patterns?: string[]): string[] {
   const out: string[] = [];
   const walk = (dir: string) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       if (SKIP_COPY.has(e.name) || e.name.startsWith('.')) continue;
       const p = path.join(dir, e.name);
       const rel = path.relative(root, p);
-      if (exclude?.some((x) => match(rel, x))) continue;
       if (e.isDirectory()) walk(p);
       else out.push(rel);
     }
   };
   walk(root);
-  if (patterns?.length) return out.filter((f) => patterns.some((p) => match(f, p) || p.startsWith('!')) || true);
-  return out.slice(0, 4000);
+  const filtered = patterns?.length ? out.filter((f) => matchesPackagePatterns(f, patterns)) : out;
+  return filtered.slice(0, 4000);
 }
 
-function match(file: string, pattern: string): boolean {
-  const pat = pattern.replace(/^!/, '').replace(/\\/g, '/');
+/** Serverless-style package.patterns: if any include exists, only those files are packed; bangs exclude. */
+export function matchesPackagePatterns(file: string, patterns: string[]): boolean {
+  const includes = patterns.filter((p) => !p.startsWith('!'));
+  const excludes = patterns.filter((p) => p.startsWith('!'));
+  if (includes.length && !includes.some((p) => globMatch(file, p))) return false;
+  if (excludes.some((p) => globMatch(file, p))) return false;
+  return true;
+}
+
+export function globMatch(file: string, pattern: string): boolean {
+  const pat = pattern.replace(/^!/, '').replace(/\\/g, '/').replace(/^\.\//, '');
   const f = file.replace(/\\/g, '/');
-  if (pat.includes('**')) {
-    const re = new RegExp('^' + pat.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
-    return re.test(f);
+  if (pat.endsWith('/**')) {
+    const prefix = pat.slice(0, -3);
+    return f === prefix || f.startsWith(prefix + '/');
   }
-  if (pat.includes('*')) {
-    const re = new RegExp('^' + pat.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
-    return re.test(f);
+  return globToRegExp(pat).test(f);
+}
+
+function globToRegExp(pat: string): RegExp {
+  let out = '^';
+  for (let i = 0; i < pat.length; ) {
+    if (pat[i] === '*' && pat[i + 1] === '*') {
+      out += '.*';
+      i += 2;
+    } else if (pat[i] === '*') {
+      out += '[^/]*';
+      i += 1;
+    } else if (pat[i] === '?') {
+      out += '[^/]';
+      i += 1;
+    } else {
+      out += pat[i].replace(/[.+^${}()|[\]\\]/g, '\\$&');
+      i += 1;
+    }
   }
-  return f === pat || f.startsWith(pat.replace(/\/$/, '') + '/');
+  return new RegExp(out + '$');
 }
 
 function zipFiles(cwd: string, zipPath: string, files: string[]) {
