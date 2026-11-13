@@ -1,9 +1,9 @@
 /**
- * Creates a small set of sample resources in a running AWS Emulator so every page has something to show.
+ * Creates a small set of sample resources in a running Floci so every page has something to show.
  * Idempotent: "already exists" errors are treated as success.
  *
  *   npm run seed              # uses the UI's saved settings (.data/settings.json) or the defaults
- *   AWS_EMULATOR_ENDPOINT=https://127.0.0.1:9300 npm run seed
+ *   FLOCI_ENDPOINT=http://127.0.0.1:4566 npm run seed
  */
 import { createHash } from 'crypto';
 import { resolveConfig } from '../src/lib/aws';
@@ -44,7 +44,7 @@ async function main() {
 
   console.log('S3');
   await step('bucket demo-assets', () => a('s3', 'createBucket', { bucket: 'demo-assets' }));
-  await step('object demo-assets/readme.txt', () => a('s3', 'putObject', { bucket: 'demo-assets', key: 'readme.txt', contentType: 'text/plain', base64: Buffer.from('Hello from AWS Emulator\n').toString('base64') }));
+  await step('object demo-assets/readme.txt', () => a('s3', 'putObject', { bucket: 'demo-assets', key: 'readme.txt', contentType: 'text/plain', base64: Buffer.from('Hello from Floci\n').toString('base64') }));
   await step('object demo-assets/reports/2026-11.json', () => a('s3', 'putObject', { bucket: 'demo-assets', key: 'reports/2026-11.json', contentType: 'application/json', base64: Buffer.from(JSON.stringify({ leads: 42, month: '2026-11' }, null, 2)).toString('base64') }));
   await step('bucket demo-uploads', () => a('s3', 'createBucket', { bucket: 'demo-uploads' }));
 
@@ -221,7 +221,7 @@ async function main() {
   const failed = results.filter((r) => !r.ok);
   console.log(`\nDone: ${results.length - failed.length}/${results.length} steps ok.`);
   if (failed.length) {
-    console.log('Failed steps (usually emulator gaps):');
+    console.log('Failed steps (usually Floci gaps):');
     for (const f of failed) console.log(`  - ${f.step}: ${f.note}`);
   }
 }

@@ -3,10 +3,8 @@
  * (browser → Next.js route handler → AWS SDK → the active backend) the way a user would, creating, using and
  * deleting throwaway "uitest-*" resources in the region selected in the UI. demo-* seed data is untouched.
  *
- *   npm run build && npm start   # in one terminal (backend already running)
- *   npm run smoke                # against the backend selected in Settings
- *   BACKEND=floci npm run smoke  # temporarily switch to Floci, then restore
- *   BACKEND=emulator npm run smoke
+ *   npm run build && npm start   # in one terminal (Floci already running)
+ *   npm run smoke
  * UI_URL defaults to http://127.0.0.1:3297, PREFIX to "uitest".
  */
 import { mkdirSync, writeFileSync } from 'fs';
@@ -43,7 +41,7 @@ async function check(service: string, name: string, fn: () => Promise<unknown>, 
   try {
     const r = await fn();
     if (opts.expectNotImplemented) {
-      results.push({ service, check: name, ok: false, note: 'expected NotImplemented but it succeeded (emulator gained support?)' });
+      results.push({ service, check: name, ok: false, note: 'expected NotImplemented but it succeeded (Floci gained support?)' });
       console.log(`  ? ${service.padEnd(12)} ${name} — now implemented`);
     } else {
       results.push({ service, check: name, ok: true });
@@ -53,7 +51,7 @@ async function check(service: string, name: string, fn: () => Promise<unknown>, 
   } catch (e) {
     const err = e as Error & { notImplemented?: boolean };
     if (opts.expectNotImplemented && err.notImplemented) {
-      results.push({ service, check: name, ok: true, note: 'NotImplemented in emulator (UI shows "not supported" state)' });
+      results.push({ service, check: name, ok: true, note: 'NotImplemented in Floci (UI shows "not supported" state)' });
       console.log(`  ✓ ${service.padEnd(12)} ${name} — NotImplemented as expected`);
     } else {
       results.push({ service, check: name, ok: false, note: err.message });
@@ -69,34 +67,15 @@ const must = <T,>(v: T | undefined, what: string): T => {
 };
 
 async function main() {
-  type Status = { health: { ok: boolean }; region: string; backend?: 'emulator' | 'floci'; backendLabel?: string; endpoint?: string };
-  const wanted = (process.env.BACKEND || process.env.SMOKE_BACKEND || '').trim() as '' | 'emulator' | 'floci';
-  if (wanted && wanted !== 'emulator' && wanted !== 'floci') throw new Error(`BACKEND must be emulator or floci (got ${wanted})`);
+  type Status = { health: { ok: boolean }; region: string; backend?: 'floci'; backendLabel?: string; endpoint?: string };
 
-  const readStatus = async () => (await (await fetch(`${UI}/api/status`)).json()) as Status;
-  let status = await readStatus();
-  const previousBackend = status.backend ?? 'emulator';
-  let switched = false;
-  if (wanted && wanted !== previousBackend) {
-    const r = await fetch(`${UI}/api/settings`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ backend: wanted }) });
-    if (!r.ok) throw new Error(`could not switch backend to ${wanted}: ${await r.text()}`);
-    switched = true;
-    status = await readStatus();
-  }
-  const restore = async () => {
-    if (!switched) return;
-    await fetch(`${UI}/api/settings`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ backend: previousBackend }) }).catch(() => undefined);
-  };
-
+  const status = (await (await fetch(`${UI}/api/status`)).json()) as Status;
   console.log(`Smoke testing ${UI} (suffix ${id})`);
   if (!status.health.ok) {
-    await restore();
-    throw new Error(`${status.backendLabel ?? status.backend ?? 'Backend'} not healthy — start it first`);
+    throw new Error(`${status.backendLabel ?? 'Floci'} not healthy — start it first (scripts/start-local.sh)`);
   }
   const region = status.region;
-  const floci = status.backend === 'floci';
-  console.log(`Backend ${status.backendLabel ?? status.backend ?? 'AWS Emulator'} (${status.endpoint ?? ''}), region ${region}, prefix ${P}`);
-  try {
+  console.log(`Backend ${status.backendLabel ?? 'Floci'} (${status.endpoint ?? ''}), region ${region}, prefix ${P}`);
   const inRegion = (arn?: string) => { if (arn && arn.split(':')[3] && arn.split(':')[3] !== region) throw new Error(`ARN in wrong region: ${arn}`); };
   const overview = (await (await fetch(`${UI}/api/overview`)).json()) as Record<string, unknown>;
   results.push({ service: 'overview', check: 'counts for 13 services', ok: Object.keys(overview).length === 13 });
@@ -228,12 +207,12 @@ async function main() {
   // On Floci this uses a real nginx:alpine image (the container actually runs).
   const cl = P;
   type Task = { taskArn: string; lastStatus?: string; stopCode?: string; stoppedReason?: string };
-  const ecsImage = floci ? 'nginx:alpine' : 'public.ecr.aws/docker/library/busybox:latest';
-  const ecsCommand = floci ? undefined : `echo hello-from-${P}`;
-  const logNeedle = floci ? /nginx|start worker|listening|entrypoint/i : new RegExp(`hello-from-${P}`);
-  const ecsTries = floci ? 40 : 30;
+  const ecsImage = 'nginx:alpine';
+  const ecsCommand = undefined;
+  const logNeedle = /nginx|start worker|listening|entrypoint/i;
+  const ecsTries = 40;
   await check('ecs', 'create cluster', () => call('ecs', 'createCluster', { name: cl }));
-  const td = (await check('ecs', floci ? 'register task definition (nginx:alpine + awslogs)' : 'register task definition (awslogs)', async () => {
+  const td = (await check('ecs', 'register task definition (nginx:alpine + awslogs)', async () => {
     const r = await call<{ taskDefinitionArn: string; containerDefinitions: { logConfiguration?: { options?: Record<string, string> } }[] }>('ecs', 'registerTaskDefinition', { family: P, image: ecsImage, port: 80, command: ecsCommand });
     inRegion(r.taskDefinitionArn);
     if (r.containerDefinitions[0].logConfiguration?.options?.['awslogs-group'] !== `/ecs/${P}`) throw new Error('no awslogs config');
@@ -251,24 +230,21 @@ async function main() {
     if (run?.tasks?.[0]) {
       const arn = run.tasks[0].taskArn;
       const find = async () => [...(await call<Task[]>('ecs', 'tasks', { cluster: cl })), ...(await call<Task[]>('ecs', 'tasks', { cluster: cl, status: 'STOPPED' }))].find((x) => x.taskArn === arn);
-      await check('ecs', floci ? 'real image reaches RUNNING' : 'task starts (RUNNING, no pull error)', () => until(async () => {
+      await check('ecs', 'real image reaches RUNNING', () => until(async () => {
         const t = await find();
         if (t?.stopCode === 'TaskFailedToStart') throw new Error(t.stoppedReason);
-        if (floci) return t?.lastStatus === 'RUNNING';
-        return t?.lastStatus === 'RUNNING' || t?.stopCode === 'EssentialContainerExited';
-      }, ecsTries, floci ? 1000 : 500));
+        return t?.lastStatus === 'RUNNING';
+      }, ecsTries, 1000));
       await check('ecs', 'container output in /ecs/<family>', () => until(async () => {
         for (const x of await call<{ logStreamName: string }[]>('logs', 'streams', { group: `/ecs/${P}` })) {
           const ev = await call<{ events: { message: string }[] }>('logs', 'events', { group: `/ecs/${P}`, stream: x.logStreamName });
           if (ev.events.some((e) => logNeedle.test(e.message))) return true;
         }
         return false;
-      }, ecsTries, floci ? 1000 : 500));
+      }, ecsTries, 1000));
       await check('logs', 'ECS source filter knows the group', async () => { const g = await call<string[]>('logs', 'ecsGroups'); if (!g.includes(`/ecs/${P}`)) throw new Error(JSON.stringify(g)); });
-      if (floci) {
-        await check('ecs', 'stop the standalone real-image task', () => call('ecs', 'stopTask', { cluster: cl, task: arn }));
-      }
-      await check('ecs', 'stopped tasks list shows stop reason', () => until(async () => (await call<Task[]>('ecs', 'tasks', { cluster: cl, status: 'STOPPED' })).some((t) => t.taskArn === arn && !!t.stoppedReason), ecsTries, floci ? 1000 : 500));
+      await check('ecs', 'stop the standalone real-image task', () => call('ecs', 'stopTask', { cluster: cl, task: arn }));
+      await check('ecs', 'stopped tasks list shows stop reason', () => until(async () => (await call<Task[]>('ecs', 'tasks', { cluster: cl, status: 'STOPPED' })).some((t) => t.taskArn === arn && !!t.stoppedReason), ecsTries, 1000));
     }
     await check('ecs', 'create service', async () => { const r = await call<{ serviceArn: string }>('ecs', 'createService', { cluster: cl, name: 'svc', taskDefinition: td.taskDefinitionArn, desiredCount: 1, subnet: net.subnets[0]?.id }); inRegion(r.serviceArn); });
     await check('ecs', 'service launches a task', () => until(async () => (await call<Task[]>('ecs', 'tasks', { cluster: cl, service: 'svc' })).length + (await call<Task[]>('ecs', 'tasks', { cluster: cl, service: 'svc', status: 'STOPPED' })).length > 0, 20));
@@ -341,9 +317,6 @@ async function main() {
   await check('ecr', 'create repository', () => call('ecr', 'create', { name: repo }));
   await check('ecr', 'list images', () => call('ecr', 'images', { name: repo }));
   await check('ecr', 'auth token', () => call('ecr', 'authToken'));
-  if (!floci) {
-    await check('ecr', 'images of seeded demo/web', async () => { const i = await call<unknown[]>('ecr', 'images', { name: 'demo/web' }); if (!i.length) throw new Error('no images (run npm run seed)'); });
-  }
   await check('ecr', 'delete repository', () => call('ecr', 'delete', { name: repo }));
 
   const failed = results.filter((r) => !r.ok);
@@ -353,9 +326,6 @@ async function main() {
   if (failed.length) {
     for (const f of failed) console.log(`  FAIL ${f.service} ${f.check}: ${f.note}`);
     process.exitCode = 1;
-  }
-  } finally {
-    await restore();
   }
 }
 

@@ -1,78 +1,76 @@
 import { promises as fs } from 'fs';
-import os from 'os';
 import path from 'path';
-import {
-  inferBackend,
-  presetFor,
-  type BackendId,
-} from './backends';
+import { backendPreset, type BackendId } from './backends';
 
 export type { BackendId, BackendPreset } from './backends';
 export {
-  DEFAULT_PORT,
   FLOCI_DEFAULT_PORT,
+  FLOCI_ACCOUNT_ID,
+  backendPreset,
   backendPresets,
+  flociEndpoint,
   healthPathFor,
-  inferBackend,
   isFloci,
   presetFor,
 } from './backends';
 
 export interface Settings {
-  /** Which local AWS backend the UI talks to. */
+  /** Always Floci; kept so older settings.json files still sanitize cleanly. */
   backend: BackendId;
-  /** Emulator endpoint, e.g. https://127.0.0.1:9297 */
+  /** Floci endpoint, e.g. http://127.0.0.1:4566 */
   endpoint: string;
   region: string;
-  /** Verify the emulator's TLS certificate against its generated ca.pem. */
   tlsVerify: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  backend: 'emulator',
-  endpoint: presetFor('emulator').endpoint,
-  region: process.env.AWS_EMULATOR_REGION || 'us-east-1',
-  tlsVerify: true,
+  backend: 'floci',
+  endpoint: backendPreset().endpoint,
+  region: process.env.AWS_EMULATOR_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1',
+  tlsVerify: false,
 };
 
 export function dataDir() {
   return process.env.AWS_EMULATOR_UI_DATA_DIR || path.join(process.cwd(), '.data');
 }
 
-export function emulatorHome() {
-  return process.env.AWS_EMULATOR_HOME || path.join(os.homedir(), '.aws', 'emulator');
-}
-
 const settingsFile = () => path.join(dataDir(), 'settings.json');
 
-export function sanitizeSettings(input: Partial<Settings>, base: Settings = DEFAULT_SETTINGS): Settings {
-  const s: Settings = { ...base };
-  if (input.backend === 'emulator' || input.backend === 'floci') {
-    const p = presetFor(input.backend);
-    s.backend = p.id;
-    s.endpoint = p.endpoint;
-    s.tlsVerify = p.tlsVerify;
+const EMULATOR_PORTS = new Set([9297, 443]);
+
+function looksLikeAwsEmulator(endpoint: string): boolean {
+  try {
+    const u = new URL(endpoint);
+    const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
+    if (u.protocol === 'https:' && (port === 9297 || /emulator/i.test(u.hostname))) return true;
+    if (port === 9297) return true;
+  } catch {
+    /* ignore */
   }
-  // An explicit endpoint (legacy files, tests, custom ports) wins over the preset
-  // only when the caller didn't just switch backend in the same payload.
-  if (typeof input.endpoint === 'string' && input.endpoint.trim() && input.backend === undefined) {
+  return false;
+}
+
+export function sanitizeSettings(input: Partial<Settings>, base: Settings = DEFAULT_SETTINGS): Settings {
+  const s: Settings = { ...base, backend: 'floci', tlsVerify: false };
+  const preset = backendPreset();
+  // Migrating off AWS Emulator: a saved 9297 / https emulator endpoint becomes the Floci default.
+  if (!s.endpoint || looksLikeAwsEmulator(s.endpoint)) s.endpoint = preset.endpoint;
+  if (typeof input.endpoint === 'string' && input.endpoint.trim()) {
     const url = new URL(input.endpoint.trim()); // throws on garbage
     if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('Endpoint must be http(s)');
-    s.endpoint = url.origin;
-    s.backend = inferBackend(s.endpoint);
-    if (s.backend === 'floci') s.tlsVerify = false;
+    const origin = url.origin;
+    s.endpoint = looksLikeAwsEmulator(origin) ? preset.endpoint : origin;
   }
   if (typeof input.region === 'string' && /^[a-z]{2}(-[a-z]+)+\-\d$/.test(input.region.trim())) s.region = input.region.trim();
-  if (typeof input.tlsVerify === 'boolean' && input.backend === undefined) s.tlsVerify = input.tlsVerify;
-  if (s.backend !== 'emulator' && s.backend !== 'floci') s.backend = inferBackend(s.endpoint);
+  s.backend = 'floci';
+  s.tlsVerify = false;
   return s;
 }
 
 /**
- * Credentials are never stored: AWS Emulator uses the per-run keys it writes to
- * ~/.aws/emulator/<port>/ (see emulator-files.ts); Floci uses the dummy test/test pair.
- * Only these fields are persisted, and saving rewrites the file, which also drops keys
- * left there by older versions.
+ * Credentials are never stored. Floci accepts any non-empty keys (we use test/test).
+ * Only endpoint and region are persisted; saving rewrites the file, which also drops
+ * keys or AWS Emulator fields left there by older versions.
  */
 export async function loadSettings(): Promise<Settings> {
   try {
@@ -94,3 +92,6 @@ export function endpointPort(endpoint: string): number {
   const u = new URL(endpoint);
   return Number(u.port || (u.protocol === 'https:' ? 443 : 80));
 }
+
+// Silence unused in case a caller still references the old port set.
+void EMULATOR_PORTS;

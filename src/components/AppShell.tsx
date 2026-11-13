@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { LuLayoutDashboard, LuSettings } from 'react-icons/lu';
+import { LuLayoutDashboard, LuRocket, LuSettings } from 'react-icons/lu';
 import { SERVICES } from '@/lib/catalog';
 import { cn } from '@/lib/cn';
 import { SERVICE_ICONS } from './icons';
@@ -12,7 +12,7 @@ import { Pill, useInterval } from './ui';
 import { RegionPicker } from './RegionPicker';
 
 export interface Status {
-  backend?: 'emulator' | 'floci';
+  backend?: 'floci';
   backendLabel?: string;
   endpoint: string;
   region: string;
@@ -72,7 +72,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="flex items-center gap-3">
             {status ? (
               <span className="hidden items-center gap-2 text-xs text-neutral-500 sm:flex">
-                <span className="font-medium text-neutral-700">{status.backendLabel ?? (status.backend === 'floci' ? 'Floci' : 'AWS Emulator')}</span>
+                <span className="font-medium text-neutral-700">{status.backendLabel ?? "Floci"}</span>
                 <span className="hidden font-mono xl:inline">{status.endpoint}</span>
               </span>
             ) : null}
@@ -100,7 +100,8 @@ export function AppShell({ children }: { children: ReactNode }) {
                 {s.short}
               </NavLink>
             ))}
-            <div className="mt-auto pt-4">
+            <div className="mt-auto flex flex-col gap-0.5 pt-4">
+              <NavLink href="/deployments" icon={LuRocket} active={pathname.startsWith('/deployments')}>Deployments</NavLink>
               <NavLink href="/settings" icon={LuSettings} active={pathname === '/settings'}>Settings</NavLink>
             </div>
           </aside>

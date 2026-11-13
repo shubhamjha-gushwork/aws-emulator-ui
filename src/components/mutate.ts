@@ -21,7 +21,7 @@ export function useMutation() {
       } catch (e) {
         const err = toApiError(e);
         setError(err);
-        toast('error', err.notImplemented ? `Not supported by AWS Emulator yet: ${err.message}` : `${err.name}: ${err.message}`);
+        toast('error', err.notImplemented ? `Not supported by Floci yet: ${err.message}` : `${err.name}: ${err.message}`);
         return undefined;
       } finally {
         setBusy(false);

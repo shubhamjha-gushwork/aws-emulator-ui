@@ -33,7 +33,7 @@ export default function OverviewPage() {
   const total = overview ? Object.values(overview).flatMap((o) => o.counts).reduce((a, c) => a + Math.max(0, c.value), 0) : null;
 
   const metrics = [
-    { icon: LuActivity, label: 'Emulator', value: status === null ? '…' : ok ? 'Healthy' : 'Offline', pill: status === null ? null : ok ? <Pill tone="green" dot>/__admin/health 200</Pill> : <Pill tone="red" dot>{status.health.error ?? `HTTP ${status.health.status}`}</Pill> },
+    { icon: LuActivity, label: 'Floci', value: status === null ? '…' : ok ? 'Healthy' : 'Offline', pill: status === null ? null : ok ? <Pill tone="green" dot>/_floci/health 200</Pill> : <Pill tone="red" dot>{status.health.error ?? `HTTP ${status.health.status}`}</Pill> },
     { icon: LuGauge, label: 'Health latency', value: status ? `${status.health.ms} ms` : '…', pill: null },
     { icon: LuServer, label: 'Resources', value: total === null ? '…' : total.toLocaleString(), pill: <Pill tone="blue">13 services</Pill> },
     { icon: LuGlobe, label: 'Region', value: status ? regionName(status.region) : '…', pill: status ? <Pill tone="blue">{status.region}</Pill> : null, small: true },
@@ -50,7 +50,7 @@ export default function OverviewPage() {
                 <span className="font-mono text-[13px]">{status.endpoint}</span> · {status.region} · checked <TimeAgo value={status.checkedAt} />
               </>
             ) : (
-              'Connecting to AWS Emulator…'
+              'Connecting to Floci…'
             )}
           </p>
         </div>
@@ -82,10 +82,9 @@ export default function OverviewPage() {
 
       {status && !ok ? (
         <Card className="px-6 py-5">
-          <div className="font-grotesk text-lg font-medium text-neutral-900">The emulator isn&apos;t answering</div>
+          <div className="font-grotesk text-lg font-medium text-neutral-900">Floci isn&apos;t answering</div>
           <p className="mt-1 text-sm text-neutral-600">
-            Start it with <code className="rounded bg-neutral-50 px-1.5 py-0.5 font-mono text-[12.5px]">scripts/start-local.sh</code> (or{' '}
-            <code className="rounded bg-neutral-50 px-1.5 py-0.5 font-mono text-[12.5px]">aws-emulator</code> on Linux), then refresh.
+            Start it with <code className="rounded bg-neutral-50 px-1.5 py-0.5 font-mono text-[12.5px]">scripts/start-local.sh</code>, then refresh.
           </p>
         </Card>
       ) : null}

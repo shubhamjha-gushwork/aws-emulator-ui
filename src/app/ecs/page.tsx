@@ -8,7 +8,6 @@ import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, InlineError } from '@/components/states';
 import { DataTable } from '@/components/table';
 import { Button, Checkbox, ConfirmDialog, Empty, Field, Input, JsonBlock, Modal, Mono, Pill, Segmented, Select, Spinner, StatusPill, TimeAgo } from '@/components/ui';
-import { useStatus } from '@/components/AppShell';
 import { useAws } from '@/components/use-aws';
 import { useMutation } from '@/components/mutate';
 
@@ -74,7 +73,6 @@ export default function EcsPage() {
 }
 
 function ClusterDetail({ c, onChanged, onDeleted }: { c: Cluster; onChanged: () => void; onDeleted: () => void }) {
-  const floci = useStatus(null).status?.backend === 'floci';
   const [tab, setTab] = useState<'services' | 'tasks'>('services');
   const services = useAws<Service[]>('ecs', 'services', { cluster: c.clusterArn });
   const [taskStatus, setTaskStatus] = useState<'RUNNING' | 'STOPPED'>('RUNNING');
@@ -119,7 +117,7 @@ function ClusterDetail({ c, onChanged, onDeleted }: { c: Cluster; onChanged: () 
         <>
         <div className="flex items-center gap-3 border-b border-neutral-100 px-5 py-3">
           <Segmented value={taskStatus} onChange={setTaskStatus} options={[{ value: 'RUNNING', label: 'Running / pending' }, { value: 'STOPPED', label: 'Stopped' }]} />
-          {taskStatus === 'STOPPED' ? <span className="text-xs text-neutral-500">{floci ? 'Most recent 100 stopped tasks.' : 'Most recent 100. AWS Emulator holds at most 512 tasks in total, stopped ones included, and frees them only when their cluster is deleted.'}</span> : null}
+          {taskStatus === 'STOPPED' ? <span className="text-xs text-neutral-500">Most recent 100 stopped tasks.</span> : null}
         </div>
         <DataTable
           rows={tasks.data}
@@ -168,7 +166,6 @@ function ClusterDetail({ c, onChanged, onDeleted }: { c: Cluster; onChanged: () 
 }
 
 function LaunchModal({ open, kind, cluster, onClose, onDone }: { open: boolean; kind: 'service' | 'task'; cluster: string; onClose: () => void; onDone: () => void }) {
-  const floci = useStatus(null).status?.backend === 'floci';
   const tds = useAws<string[]>('ecs', 'taskDefinitions', open ? {} : null);
   const net = useAws<Network>('elb', 'network', open ? {} : null);
   const [td, setTd] = useState('');
@@ -195,7 +192,7 @@ function LaunchModal({ open, kind, cluster, onClose, onDone }: { open: boolean; 
       <Field label="Task definition" hint={tds.data && !tds.data.length ? 'Register a task definition first (Task definitions tab).' : undefined}>
         <Select value={tdValue} onChange={(e) => setTd(e.target.value)} options={(tds.data ?? []).map((a) => ({ value: a, label: short(a) ?? a }))} />
       </Field>
-      {kind === 'service' ? <Field label="Desired count" hint={floci ? 'How many copies of the task the service should keep running. Floci runs the image as a real container and replaces tasks that stop.' : 'AWS Emulator stops every task after about 10 seconds, so the service keeps launching replacements. Each stopped task counts toward the emulator\'s 512-task limit, so scale to 0 when you\'re done.'}><Input type="number" min={0} value={desired} onChange={(e) => setDesired(e.target.value)} /></Field> : null}
+      {kind === 'service' ? <Field label="Desired count" hint="How many copies of the task the service should keep running. Floci runs the image as a real container and replaces tasks that stop."><Input type="number" min={0} value={desired} onChange={(e) => setDesired(e.target.value)} /></Field> : null}
       <Field label="Subnet"><Select value={subnetValue} onChange={(e) => setSubnet(e.target.value)} options={(net.data?.subnets ?? []).map((s) => ({ value: s.id, label: `${s.id} · ${s.az} · ${s.cidr}` }))} /></Field>
       <InlineError error={m.error ?? tds.error ?? net.error} />
     </Modal>
@@ -203,25 +200,14 @@ function LaunchModal({ open, kind, cluster, onClose, onDone }: { open: boolean; 
 }
 
 function TaskDefinitions() {
-  const status = useStatus(null).status;
-  const floci = status?.backend === 'floci';
   const list = useAws<string[]>('ecs', 'taskDefinitions');
   const [sel, setSel] = useSelection('taskdef');
   const detail = useAws<unknown>('ecs', 'describeTaskDefinition', sel ? { taskDefinition: sel } : null);
   const [open, setOpen] = useState(false);
   const [family, setFamily] = useState('');
-  const emulatorImage = 'public.ecr.aws/docker/library/busybox:latest';
-  const emulatorCommand = 'echo "hello from ECS"; date';
-  const [image, setImage] = useState(emulatorImage);
+  const [image, setImage] = useState('nginx:alpine');
   const [port, setPort] = useState('80');
-  const [command, setCommand] = useState(emulatorCommand);
-  useEffect(() => {
-    if (!status) return;
-    if (floci) {
-      setImage((v) => (v === emulatorImage ? 'nginx:alpine' : v));
-      setCommand((v) => (v === emulatorCommand ? '' : v));
-    }
-  }, [status, floci]);
+  const [command, setCommand] = useState('');
   const [logs, setLogs] = useState(true);
   const [logGroup, setLogGroup] = useState('');
   const [confirmDereg, setConfirmDereg] = useState(false);
@@ -249,8 +235,8 @@ function TaskDefinitions() {
       <Modal open={open} onClose={() => setOpen(false)} title="Register task definition" description="One Fargate container (256 CPU / 512 MB)." footer={<><Button onClick={() => setOpen(false)}>Cancel</Button><Button variant="primary" disabled={!family || !image} loading={m.busy} onClick={async () => { if (await m.run('ecs', 'registerTaskDefinition', { family, image, port, command: command.trim() || undefined, logs, logGroup: logGroup || undefined }, `Registered ${family}`)) { setOpen(false); void list.reload(); } }}>Register</Button></>}>
         <Field label="Family"><Input value={family} onChange={(e) => setFamily(e.target.value)} autoFocus /></Field>
         <Field label="Image"><Input value={image} onChange={(e) => setImage(e.target.value)} /></Field>
-        <Field label={floci ? 'Command (optional)' : 'Command (optional, run with sh -c)'} hint={floci ? 'Leave empty to run the image as-is (nginx, node, python, …). Floci starts a real container and streams awslogs to CloudWatch. A command, if set, is passed to the container.' : 'AWS Emulator runs simple shell commands (echo, sleep…) and sends their output to awslogs; it has no container runtime, so an image\'s own program (nginx, node, python) doesn\'t run. Every task stops after about 10 seconds.'}>
-          <Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder={floci ? 'leave empty to run the image' : 'echo "hello from ECS"'} />
+        <Field label="Command (optional)" hint="Leave empty to run the image as-is (nginx, node, python, …). Floci starts a real container and streams awslogs to CloudWatch. A command, if set, is passed to the container.">
+          <Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="leave empty to run the image" />
         </Field>
         <Field label="Container port (optional)"><Input value={port} onChange={(e) => setPort(e.target.value)} /></Field>
         <Checkbox checked={logs} onChange={setLogs} label="Send container logs to CloudWatch (awslogs driver)" />

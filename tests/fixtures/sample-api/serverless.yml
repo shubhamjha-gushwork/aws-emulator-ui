@@ -1,0 +1,43 @@
+service: sample-api
+frameworkVersion: '3'
+
+custom:
+  stage: ${opt:stage, 'dev'}
+  appSecrets: ${ssm:/aws/reference/secretsmanager/${self:custom.stage}/app-secrets}
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: ${opt:region, 'us-east-1'}
+  environment:
+    STAGE: ${self:custom.stage}
+    API_TOKEN: ${self:custom.appSecrets.API_TOKEN}
+    FROM_ENV: ${env:SAMPLE_GREETING, 'hello'}
+
+functions:
+  ping:
+    handler: handlers/ping.handler
+    events:
+      - http:
+          path: /ping
+          method: get
+          cors: true
+  worker:
+    handler: handlers/worker.handler
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [JobsQueue, Arn]
+          batchSize: 1
+      - schedule: rate(5 minutes)
+
+resources:
+  Resources:
+    JobsQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: sample-jobs-${self:custom.stage}
+    DataBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: sample-data-${self:custom.stage}

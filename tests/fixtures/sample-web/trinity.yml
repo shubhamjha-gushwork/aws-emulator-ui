@@ -1,0 +1,23 @@
+name: sample-web
+region: us-east-1
+environment:
+  refs:
+    appSecrets: ${ssm:/aws/reference/secretsmanager/${custom.stage}/app-secrets}
+  variables:
+    PORT: '8080'
+    DATABASE_URL: ${environment.refs.appSecrets.DATABASE_URL}
+    LOG_LEVEL: INFO
+custom:
+  dev:
+    cpu: 256
+    memoryLimitMiB: 512
+    desiredCapacity: 1
+stacks:
+  HTTPApi:
+    - name: sample-web
+      dockerfile: Dockerfile
+      appPort: 8080
+      healthCheckPath: /health
+      cpu: ${custom.${custom.stage}.cpu}
+      memoryLimitMiB: ${custom.${custom.stage}.memoryLimitMiB}
+      desiredCapacity: ${custom.${custom.stage}.desiredCapacity}

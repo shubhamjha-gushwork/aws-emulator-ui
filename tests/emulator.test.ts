@@ -1,6 +1,7 @@
 import { IAMClient, CreateRoleCommand, DeleteRoleCommand } from '@aws-sdk/client-iam';
 /**
- * Live checks against a running AWS Emulator. Skipped automatically when none is reachable.
+ * Live checks against a running Floci. Off by default (the smoke test covers this).
+ * Run with LIVE=1 npm test when you want them.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { healthCheck, resolveConfig } from '@/lib/aws';
@@ -8,12 +9,18 @@ import { makeCtx } from '@/lib/services/types';
 import { services } from '@/lib/services';
 import { DEFAULT_SETTINGS } from '@/lib/settings';
 
+const live = process.env.LIVE === '1';
 let up = false;
 beforeAll(async () => {
+  if (!live) return;
   up = (await healthCheck(await resolveConfig(DEFAULT_SETTINGS))).ok;
 });
 
-describe('AWS Emulator (live)', () => {
+describe('Floci (live)', () => {
+  if (!live) {
+    it('skipped (set LIVE=1 to run against a running Floci)', () => {});
+    return;
+  }
   it('every overview count call succeeds', async (t) => {
     if (!up) return t.skip();
     const ctx = makeCtx(await resolveConfig(DEFAULT_SETTINGS));

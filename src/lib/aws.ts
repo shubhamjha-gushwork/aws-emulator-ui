@@ -1,8 +1,7 @@
 import http from 'http';
 import https from 'https';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
-import { readRunFiles } from './emulator-files';
-import { healthPathFor, isFloci, loadSettings, presetFor, type BackendId, type Settings } from './settings';
+import { backendPreset, healthPathFor, loadSettings, type BackendId, type Settings } from './settings';
 
 export interface ResolvedConfig {
   backend: BackendId;
@@ -10,8 +9,8 @@ export interface ResolvedConfig {
   endpoint: string;
   region: string;
   credentials: { accessKeyId: string; secretAccessKey: string };
-  /** Where the SigV4 keys came from (server-side only; not shown in the UI). */
-  credentialSource: 'emulator-run-files' | 'fallback-dummy';
+  /** Floci accepts any non-empty keys; we always use test/test. */
+  credentialSource: 'floci-dummy';
   caLoaded: boolean;
   tlsVerify: boolean;
   runDir: string;
@@ -21,36 +20,26 @@ export interface ResolvedConfig {
 
 export async function resolveConfig(settings?: Settings): Promise<ResolvedConfig> {
   const s = settings ?? (await loadSettings());
-  const backend: BackendId = s.backend ?? (isFloci(s) ? 'floci' : 'emulator');
-  const preset = presetFor(backend);
-  const floci = backend === 'floci';
-  // Floci accepts any non-empty keys (test/test). AWS Emulator uses the per-run
-  // files under ~/.aws/emulator/<port>/, with the same dummy pair as a fallback.
-  const run = floci ? { dir: '', credentials: undefined as ResolvedConfig['credentials'] | undefined, ca: undefined as string | undefined } : await readRunFiles(s.endpoint);
-  const credentials = run.credentials ?? { accessKeyId: 'test', secretAccessKey: 'test' };
-  const credentialSource: ResolvedConfig['credentialSource'] = run.credentials ? 'emulator-run-files' : 'fallback-dummy';
-  const agent = new https.Agent({
-    keepAlive: true,
-    ca: s.tlsVerify && run.ca ? run.ca : undefined,
-    rejectUnauthorized: floci ? false : s.tlsVerify,
-  });
+  const preset = backendPreset();
+  const credentials = { accessKeyId: 'test', secretAccessKey: 'test' };
+  const agent = new https.Agent({ keepAlive: true, rejectUnauthorized: false });
   const httpAgent = new http.Agent({ keepAlive: true });
   return {
-    backend,
+    backend: 'floci',
     backendLabel: preset.label,
     endpoint: s.endpoint,
     region: s.region,
     credentials,
-    credentialSource,
-    caLoaded: Boolean(run.ca),
-    tlsVerify: s.tlsVerify,
-    runDir: run.dir,
+    credentialSource: 'floci-dummy',
+    caLoaded: false,
+    tlsVerify: false,
+    runDir: '',
     requestHandler: new NodeHttpHandler({
       httpsAgent: agent,
       httpAgent,
       connectionTimeout: 4000,
-      // Floci's first Lambda/ECS calls may pull a real image.
-      requestTimeout: floci ? 120000 : 30000,
+      // First Lambda/ECS calls may pull a real image.
+      requestTimeout: 120000,
     }),
     httpsAgent: agent,
   };

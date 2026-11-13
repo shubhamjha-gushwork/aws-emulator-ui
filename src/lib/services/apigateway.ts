@@ -5,27 +5,22 @@ import {
 } from '@aws-sdk/client-api-gateway';
 import http from 'node:http';
 import https from 'node:https';
-import type { BackendId } from '../backends';
 import {
   ApiGatewayV2Client, GetApisCommand, CreateApiCommand, DeleteApiCommand, GetRoutesCommand, GetStagesCommand as GetStagesV2Command,
   GetIntegrationsCommand, CreateRouteCommand, CreateStageCommand, DeleteRouteCommand, ExportApiCommand, CreateIntegrationCommand,
 } from '@aws-sdk/client-apigatewayv2';
 import { type ServiceModule, str, optStr, safeCount, decodeBytes, InputError } from './types';
 
-/** Data-plane paths for a test invoke. AWS Emulator uses `/_aws/execute-api/…`; Floci uses `/restapis/…/_user_request_` and `/execute-api/…`. */
-function executePaths(backend: BackendId | undefined, id: string, stage: string, path: string): string[] {
-  if (backend === 'floci') {
-    if (stage === '$default') {
-      return [`/execute-api/${id}${path}`, `/execute-api/${id}/$default${path}`, `/_aws/execute-api/${id}${path}`];
-    }
-    return [
-      `/restapis/${id}/${encodeURIComponent(stage)}/_user_request_${path}`,
-      `/execute-api/${id}/${encodeURIComponent(stage)}${path}`,
-      `/_aws/execute-api/${id}/${encodeURIComponent(stage)}${path}`,
-    ];
+/** Data-plane paths for a test invoke against Floci (HTTP and REST APIs). */
+function executePaths(id: string, stage: string, path: string): string[] {
+  if (stage === '$default') {
+    return [`/execute-api/${id}${path}`, `/execute-api/${id}/$default${path}`, `/_aws/execute-api/${id}${path}`];
   }
-  const prefix = stage === '$default' ? `/_aws/execute-api/${id}` : `/_aws/execute-api/${id}/${encodeURIComponent(stage)}`;
-  return [`${prefix}${path}`];
+  return [
+    `/restapis/${id}/${encodeURIComponent(stage)}/_user_request_${path}`,
+    `/execute-api/${id}/${encodeURIComponent(stage)}${path}`,
+    `/_aws/execute-api/${id}/${encodeURIComponent(stage)}${path}`,
+  ];
 }
 
 function invokeDataPlane(endpoint: string, httpsAgent: https.Agent, path: string, method: string, body?: string) {
@@ -146,7 +141,7 @@ export const apigateway: ServiceModule = {
       await ctx.client(ApiGatewayV2Client).send(new DeleteRouteCommand({ ApiId: str(p, 'id'), RouteId: str(p, 'routeId') }));
       return { deleted: true };
     },
-    /** Test-invoke a deployed REST stage or HTTP API route through the emulator's data plane. */
+    /** Test-invoke a deployed REST stage or HTTP API route through Floci's data plane. */
     async invoke(ctx, p) {
       const id = str(p, 'id');
       if (!/^[a-z0-9]+$/i.test(id)) throw new InputError('Invalid API id');
@@ -155,7 +150,7 @@ export const apigateway: ServiceModule = {
       const path = optStr(p, 'path') ?? '/';
       if (!/^\/[\w\-./{}~%]*$/.test(path)) throw new InputError('Path must start with / and contain only URL path characters');
       const body = optStr(p, 'body');
-      const paths = executePaths(ctx.cfg.backend, id, stage, path);
+      const paths = executePaths(id, stage, path);
       let last: Awaited<ReturnType<typeof invokeDataPlane>> | undefined;
       for (const pth of paths) {
         last = await invokeDataPlane(ctx.cfg.endpoint, ctx.cfg.httpsAgent, pth, method, body);
@@ -163,7 +158,7 @@ export const apigateway: ServiceModule = {
       }
       return last!;
     },
-    /** OpenAPI 3.0 export (the emulator currently answers NotImplemented — the UI shows that state). */
+    /** OpenAPI 3.0 export (Floci currently answers NotImplemented — the UI shows that state). */
     async exportHttpApi(ctx, p) {
       const r = await ctx.client(ApiGatewayV2Client).send(new ExportApiCommand({ ApiId: str(p, 'id'), OutputType: 'JSON', Specification: 'OAS30' }));
       return { body: decodeBytes(r.body) };

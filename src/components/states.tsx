@@ -5,7 +5,7 @@ import { LuCircleAlert, LuFlaskConical, LuPlug } from 'react-icons/lu';
 import type { ApiError } from '@/lib/errors';
 import { Pill } from './ui';
 
-/** Renders an API error. NotImplemented answers get the "not supported by AWS Emulator yet" treatment. */
+/** Renders an API error. NotImplemented answers get the "not supported by Floci yet" treatment. */
 export function ErrorState({ error, what, compact }: { error: ApiError; what?: string; compact?: boolean }) {
   if (error.notImplemented) {
     return (
@@ -14,9 +14,9 @@ export function ErrorState({ error, what, compact }: { error: ApiError; what?: s
           <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gw-orange-100">
             <LuFlaskConical className="h-5 w-5 text-gw-orange-700" />
           </div>
-          <Pill tone="orange">Not supported by AWS Emulator yet</Pill>
+          <Pill tone="orange">Not supported by Floci yet</Pill>
           <p className="text-sm text-neutral-600">
-            {what ? <>The emulator doesn&apos;t implement <span className="font-medium text-neutral-900">{what}</span> yet. </> : null}
+            {what ? <>Floci doesn&apos;t implement <span className="font-medium text-neutral-900">{what}</span> yet. </> : null}
             It answered <span className="font-mono text-[12.5px]">{error.name}</span>, so there&apos;s no data to show — nothing here is faked.
           </p>
           <p className="max-w-lg break-words text-xs text-neutral-500">{error.message}</p>
@@ -31,9 +31,9 @@ export function ErrorState({ error, what, compact }: { error: ApiError; what?: s
           <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gw-red-100">
             <LuPlug className="h-5 w-5 text-gw-red-700" />
           </div>
-          <Pill tone="red">Can&apos;t reach the emulator</Pill>
+          <Pill tone="red">Can&apos;t reach Floci</Pill>
           <p className="text-sm text-neutral-600">
-            Start it with <span className="font-mono text-[12.5px]">aws-emulator</span>, or check the endpoint in{' '}
+            Start it with <span className="font-mono text-[12.5px]">scripts/start-local.sh</span>, or check the endpoint in{' '}
             <Link href="/settings" className="text-primary hover:underline">Settings</Link>.
           </p>
           <p className="max-w-lg break-words text-xs text-neutral-500">{error.message}</p>
@@ -59,7 +59,7 @@ export function InlineError({ error }: { error?: ApiError | null }) {
   if (error.notImplemented)
     return (
       <div className="rounded-lg border border-gw-orange-100 bg-gw-orange-100/40 px-3 py-2 text-sm text-gw-orange-700">
-        <span className="font-semibold">Not supported by AWS Emulator yet.</span> <span className="break-words text-xs">{error.message}</span>
+        <span className="font-semibold">Not supported by Floci yet.</span> <span className="break-words text-xs">{error.message}</span>
       </div>
     );
   return (

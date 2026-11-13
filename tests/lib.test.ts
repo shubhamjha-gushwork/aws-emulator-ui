@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { trimEpochPrecision } from '@/lib/compat';
-import { parseIni } from '@/lib/emulator-files';
 import { normalizeError, isNotImplemented } from '@/lib/errors';
-import { sanitizeSettings, DEFAULT_SETTINGS, endpointPort, inferBackend, healthPathFor } from '@/lib/settings';
+import { sanitizeSettings, DEFAULT_SETTINGS, endpointPort, healthPathFor } from '@/lib/settings';
 import { toItem } from '@/lib/services/dynamodb';
 import { str, num, strList, json, InputError } from '@/lib/services/types';
 import { awsReplacer, stripMetadata } from '@/lib/serialize';
@@ -20,13 +19,6 @@ describe('trimEpochPrecision', () => {
   });
 });
 
-describe('parseIni', () => {
-  it('reads the emulator credentials file', () => {
-    const ini = parseIni('[default]\naws_access_key_id = AKIA_TEST\naws_secret_access_key=secret=with=eq\n# comment\n');
-    expect(ini.default).toEqual({ aws_access_key_id: 'AKIA_TEST', aws_secret_access_key: 'secret=with=eq' });
-  });
-});
-
 describe('errors', () => {
   it('flags NotImplemented answers', () => {
     expect(isNotImplemented('NotImplemented', 'x')).toBe(true);
@@ -37,7 +29,7 @@ describe('errors', () => {
     expect(normalizeError(e)).toMatchObject({ name: 'NotImplemented', notImplemented: true, connection: false, status: 501 });
   });
   it('flags connection failures', () => {
-    const e = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:9297'), { code: 'ECONNREFUSED' });
+    const e = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:4566'), { code: 'ECONNREFUSED' });
     expect(normalizeError(e).connection).toBe(true);
   });
 });
@@ -53,8 +45,8 @@ describe('settings', () => {
     expect(() => sanitizeSettings({ endpoint: 'file:///etc/passwd' })).toThrow();
   });
   it('derives the run folder port', () => {
-    expect(endpointPort('https://127.0.0.1:9297')).toBe(9297);
-    expect(endpointPort('https://emulator.local')).toBe(443);
+    expect(endpointPort('http://127.0.0.1:4566')).toBe(4566);
+    expect(endpointPort('http://floci.local')).toBe(80);
   });
 });
 
@@ -127,24 +119,19 @@ describe('settings never keep credentials', () => {
     expect(s).toEqual({ ...DEFAULT_SETTINGS, region: 'ap-south-1' });
     expect(Object.keys(s).sort()).toEqual(['backend', 'endpoint', 'region', 'tlsVerify']);
   });
-  it('switches to the Floci preset and back', () => {
-    const f = sanitizeSettings({ backend: 'floci' });
+  it('is always Floci, and migrates a saved AWS Emulator endpoint', () => {
+    const f = sanitizeSettings({ backend: 'floci' } as never);
     expect(f.backend).toBe('floci');
     expect(f.endpoint).toBe('http://127.0.0.1:4566');
     expect(f.tlsVerify).toBe(false);
-    const e = sanitizeSettings({ backend: 'emulator' }, f);
-    expect(e.backend).toBe('emulator');
-    expect(e.endpoint).toBe(DEFAULT_SETTINGS.endpoint);
-    expect(e.tlsVerify).toBe(true);
-    expect(e.region).toBe(f.region);
-  });
-  it('infers Floci from a legacy HTTP :4566 endpoint and keeps a custom emulator port', () => {
-    expect(inferBackend('http://127.0.0.1:4566')).toBe('floci');
-    expect(healthPathFor({ backend: 'floci' })).toBe('/_floci/health');
-    expect(healthPathFor({ backend: 'emulator' })).toBe('/__admin/health');
-    const custom = sanitizeSettings({ endpoint: 'https://127.0.0.1:9300' });
-    expect(custom.backend).toBe('emulator');
-    expect(custom.endpoint).toBe('https://127.0.0.1:9300');
+    const migrated = sanitizeSettings({ endpoint: 'https://127.0.0.1:9297' });
+    expect(migrated.backend).toBe('floci');
+    expect(migrated.endpoint).toBe('http://127.0.0.1:4566');
+    expect(migrated.tlsVerify).toBe(false);
+    expect(healthPathFor()).toBe('/_floci/health');
+    const custom = sanitizeSettings({ endpoint: 'http://127.0.0.1:4567' });
+    expect(custom.backend).toBe('floci');
+    expect(custom.endpoint).toBe('http://127.0.0.1:4567');
   });
 });
 
