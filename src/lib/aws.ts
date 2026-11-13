@@ -1,9 +1,12 @@
+import http from 'http';
 import https from 'https';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { readRunFiles } from './emulator-files';
-import { loadSettings, type Settings } from './settings';
+import { healthPathFor, isFloci, loadSettings, presetFor, type BackendId, type Settings } from './settings';
 
 export interface ResolvedConfig {
+  backend: BackendId;
+  backendLabel: string;
   endpoint: string;
   region: string;
   credentials: { accessKeyId: string; secretAccessKey: string };
@@ -18,16 +21,23 @@ export interface ResolvedConfig {
 
 export async function resolveConfig(settings?: Settings): Promise<ResolvedConfig> {
   const s = settings ?? (await loadSettings());
-  const run = await readRunFiles(s.endpoint);
-  // Always the emulator's own per-run keys; dummy keys only if they're missing (e.g. --auth off).
+  const backend: BackendId = s.backend ?? (isFloci(s) ? 'floci' : 'emulator');
+  const preset = presetFor(backend);
+  const floci = backend === 'floci';
+  // Floci accepts any non-empty keys (test/test). AWS Emulator uses the per-run
+  // files under ~/.aws/emulator/<port>/, with the same dummy pair as a fallback.
+  const run = floci ? { dir: '', credentials: undefined as ResolvedConfig['credentials'] | undefined, ca: undefined as string | undefined } : await readRunFiles(s.endpoint);
   const credentials = run.credentials ?? { accessKeyId: 'test', secretAccessKey: 'test' };
   const credentialSource: ResolvedConfig['credentialSource'] = run.credentials ? 'emulator-run-files' : 'fallback-dummy';
   const agent = new https.Agent({
     keepAlive: true,
     ca: s.tlsVerify && run.ca ? run.ca : undefined,
-    rejectUnauthorized: s.tlsVerify,
+    rejectUnauthorized: floci ? false : s.tlsVerify,
   });
+  const httpAgent = new http.Agent({ keepAlive: true });
   return {
+    backend,
+    backendLabel: preset.label,
     endpoint: s.endpoint,
     region: s.region,
     credentials,
@@ -35,7 +45,13 @@ export async function resolveConfig(settings?: Settings): Promise<ResolvedConfig
     caLoaded: Boolean(run.ca),
     tlsVerify: s.tlsVerify,
     runDir: run.dir,
-    requestHandler: new NodeHttpHandler({ httpsAgent: agent, connectionTimeout: 4000, requestTimeout: 30000 }),
+    requestHandler: new NodeHttpHandler({
+      httpsAgent: agent,
+      httpAgent,
+      connectionTimeout: 4000,
+      // Floci's first Lambda/ECS calls may pull a real image.
+      requestTimeout: floci ? 120000 : 30000,
+    }),
     httpsAgent: agent,
   };
 }
@@ -53,8 +69,8 @@ export function clientOptions(c: ResolvedConfig) {
 
 export async function healthCheck(c: ResolvedConfig): Promise<{ ok: boolean; status?: number; ms: number; error?: string }> {
   const started = Date.now();
-  const url = new URL('/__admin/health', c.endpoint);
-  const mod = url.protocol === 'https:' ? https : await import('http');
+  const url = new URL(healthPathFor(c), c.endpoint);
+  const mod = url.protocol === 'https:' ? https : http;
   return new Promise((resolve) => {
     const req = mod.request(
       url,

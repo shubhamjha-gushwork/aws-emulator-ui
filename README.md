@@ -1,8 +1,10 @@
 # AWS Emulator
 
 A local web console for [Amazon's AWS Emulator](https://github.com/aws/aws-emulator)
-([docs](https://docs.aws.amazon.com/emulator/latest/userguide/what-is-service.html)), styled with the
+([docs](https://docs.aws.amazon.com/emulator/latest/userguide/what-is-service.html)) and
+[Floci](https://github.com/floci-io/floci), styled with the
 Gushwork UI design system (Tailwind v4 tokens, Inter + VertGrotesk, `#0070FF` accent, light mode).
+Switch backends in **Settings**. AWS Emulator is the default.
 
 It covers **13 services**: Lambda, SQS, SNS, S3, Secrets Manager, EventBridge (+ Scheduler), Step Functions,
 CloudWatch Logs, DynamoDB, ECS, API Gateway (REST v1 + HTTP v2), Elastic Load Balancing v2 and ECR.
@@ -15,7 +17,7 @@ If the emulator answers `NotImplemented` for something, the UI shows an orange
 
 ## Screenshots
 
-**Overview:** emulator health, resource counts per service, and the current region.
+**Overview:** backend health, resource counts per service, and the current region.
 
 ![Overview](docs/screenshots/overview.webp)
 
@@ -58,22 +60,25 @@ About 1 GB free disk for the image, and 2 GB RAM for the container.
 git clone git@github.com:shubhamjha-gushwork/aws-emulator-ui.git
 cd aws-emulator-ui
 scripts/start-local.sh --seed
+# also start Floci (http://127.0.0.1:4566) alongside the emulator:
+# scripts/start-local.sh --floci --seed
 ```
 
 `start-local.sh` does the following and is safe to rerun:
 
 1. Builds the `aws-emulator` Docker image from `docker/Dockerfile` the first time (~2 min). It uses the Apple-silicon or Intel package automatically.
-2. Starts the container `aws-emulator` on **https://127.0.0.1:9297**. It's localhost only, capped at 2 GB and has telemetry off.
+2. Starts the container `aws-emulator` on **https://127.0.0.1:9297**. It's localhost only, capped at 2 GB and has telemetry off. This is the default backend; add `--floci` or `--backend both` to also start Floci, or `--backend floci` to start only Floci (a running AWS Emulator is left alone).
 3. Runs `npm install` and `npm run build` if needed, then starts the UI in the background on **http://127.0.0.1:3297**.
-4. `--seed` creates `demo-*` resources in all 13 services. Use `--rebuild` to rebuild the emulator image (for example, to pick up a new emulator release).
+4. `--seed` creates `demo-*` resources in all 13 services on whichever backend the UI is currently set to. Use `--rebuild` to rebuild the emulator image (for example, to pick up a new emulator release).
 
-Then open **http://127.0.0.1:3297**. The header pill should say **Connected**.
+Then open **http://127.0.0.1:3297**. The header pill should say **Connected**, and the top bar shows the active backend. Switch to Floci in **Settings** after starting it.
 
 ### 3. Stop
 
 ```bash
-scripts/stop-local.sh            # stop the UI and the emulator container
-scripts/stop-local.sh --ui-only  # stop only the UI and keep the emulator (and its data) running
+scripts/stop-local.sh            # stop the UI and the AWS Emulator container (Floci is left running)
+scripts/stop-local.sh --ui-only  # stop only the UI and keep the backends (and their data) running
+scripts/stop-local.sh --floci    # also stop the Floci container
 ```
 
 > **Data is in memory only.** Stopping or restarting the emulator, quitting Docker Desktop or rebooting wipes
@@ -110,7 +115,27 @@ alias aws-real='unset AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE; aws sts get-c
 Always run `aws sts get-caller-identity` before anything destructive. The emulator account is `000000000000`.
 SDKs read the same two variables. See [Pointing your AWS SDK at AWS Emulator](https://docs.aws.amazon.com/emulator/latest/userguide/point-sdk-to-emulator.html).
 
-### 5. Linux
+### 5. Point the AWS CLI at Floci
+
+Floci is plain HTTP and accepts any non-empty keys (commonly `test` / `test`). It does not write files under `~/.aws/emulator/`.
+
+```bash
+export AWS_ENDPOINT_URL=http://127.0.0.1:4566
+export AWS_ACCESS_KEY_ID=test
+export AWS_SECRET_ACCESS_KEY=test
+export AWS_DEFAULT_REGION=us-east-1
+export AWS_EC2_METADATA_DISABLED=true
+# optional, so a real profile cannot leak in:
+# unset AWS_PROFILE
+# export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
+
+aws s3 ls
+aws ecs list-clusters
+```
+
+`unset AWS_ENDPOINT_URL AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY` (and the others) to go back to real AWS, or to the AWS Emulator files in section 4.
+
+### 6. Linux
 
 Install the `.rpm` or `.deb` from the [releases page](https://github.com/aws/aws-emulator/releases) (or follow
 [Getting started on Linux](https://docs.aws.amazon.com/emulator/latest/userguide/getting-started-linux.html)), then run:
@@ -121,7 +146,7 @@ scripts/start-local.sh --seed   # uses the installed `aws-emulator` binary; USE_
 aws-emulator -t off
 ```
 
-### 6. Manual Docker commands (what the script runs)
+### 7. Manual Docker commands (what the script runs)
 
 ```bash
 docker build --build-arg EMULATOR_ARCH=aarch64 -t aws-emulator docker   # x86_64 on Intel
@@ -138,7 +163,7 @@ docker stop aws-emulator      # stop (the container is removed because of --rm)
 
 Always publish the port as `127.0.0.1:9297:9297`. A bare `9297:9297` exposes the emulator to your whole network.
 
-### 7. Troubleshooting
+### 8. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
@@ -176,9 +201,12 @@ never reach the browser.
 ### One-command start/stop (macOS, Linux)
 
 ```bash
-scripts/start-local.sh            # start the emulator + UI (add --seed for demo data, --rebuild to rebuild the image)
-scripts/stop-local.sh             # stop the UI and the emulator (this wipes emulator state)
-scripts/stop-local.sh --ui-only   # stop only the UI
+scripts/start-local.sh                 # start AWS Emulator + UI (add --seed for demo data, --rebuild to rebuild the image)
+scripts/start-local.sh --floci         # also start Floci on http://127.0.0.1:4566
+scripts/start-local.sh --backend floci # start only Floci + UI
+scripts/stop-local.sh                  # stop the UI and AWS Emulator (this wipes emulator state; Floci stays up)
+scripts/stop-local.sh --ui-only        # stop only the UI
+scripts/stop-local.sh --floci          # also stop Floci (this wipes Floci state)
 ```
 
 - **macOS / Windows:** the emulator runs in Docker, following the official
@@ -192,7 +220,8 @@ scripts/stop-local.sh --ui-only   # stop only the UI
 - The UI runs in the background on `127.0.0.1:3297` (`npm install`/`npm run build` happen first if needed).
   Logs go to `~/Library/Logs/aws-emulator-ui/ui.log` on macOS and `.data/logs/` elsewhere.
   Emulator logs: `docker logs aws-emulator`.
-- Overrides: `AWS_EMULATOR_PORT`, `UI_PORT`, `AWS_EMULATOR_CONTAINER`, `AWS_EMULATOR_IMAGE`, `LOG_DIR`.
+- Overrides: `AWS_EMULATOR_PORT`, `UI_PORT`, `AWS_EMULATOR_CONTAINER`, `AWS_EMULATOR_IMAGE`, `LOG_DIR`, `FLOCI_PORT` (default 4566), `FLOCI_CONTAINER`, `FLOCI_IMAGE`, `FLOCI_NETWORK` (default `floci-net`).
+- **Floci** runs as `floci/floci:latest` on a user-defined Docker network (`floci-net`) with the host Docker socket mounted, 2 GB memory, and ECS task ports published on localhost so you can curl a container. A user-defined network is required for `docker push` to Floci ECR (Docker's default `bridge` cannot resolve the registry sidecar by name).
 - Nothing starts automatically at login.
 
 ### Credentials, region and TLS
@@ -206,8 +235,7 @@ dummy keys (fine for `--auth off`).
 `ap-south-1`, Asia Pacific (Singapore) `ap-southeast-1`, US East (N. Virginia) `us-east-1`, US East (Ohio)
 `us-east-2`, US West (Oregon) `us-west-2`, Europe (Ireland) `eu-west-1` and Europe (Frankfurt) `eu-central-1`
 (edit `src/lib/regions.ts` to change the list). Choosing one saves it and reloads every page's data. That menu is the only place to change the region.
-**Settings** holds the endpoint and TLS verification. Both are saved, with the region, to
-`.data/settings.json` (mode 600, git-ignored). Environment overrides:
+**Settings** is a switch between **AWS Emulator** (`https://127.0.0.1:9297`, the emulator's per-run keys and CA) and **Floci** (`http://127.0.0.1:4566`, dummy `test`/`test` keys, TLS off). Credentials are never shown or stored. The chosen backend, its endpoint and TLS flag, and the region are saved to `.data/settings.json` (mode 600, git-ignored). The top bar shows the active backend. Environment overrides:
 
 | Variable | Purpose |
 |---|---|
@@ -215,15 +243,16 @@ dummy keys (fine for `--auth off`).
 | `AWS_EMULATOR_REGION` | default region |
 | `AWS_EMULATOR_HOME` | emulator run-files directory (default `~/.aws/emulator`) |
 | `AWS_EMULATOR_UI_DATA_DIR` | where settings are stored (default `.data`) |
+| `FLOCI_ENDPOINT` / `FLOCI_PORT` | Floci endpoint (default `http://127.0.0.1:4566`) |
 
 ## Scripts
 
 | Command | What it does |
 |---|---|
 | `npm run seed` | Idempotently creates `demo-*` resources in all 13 services (functions, queues, topics with a working SNS→SQS subscription, buckets/objects, secrets, rules/schedules, a state machine plus an execution, tables/items, an ECS cluster/service/task, an ALB plus a target group, REST and HTTP APIs, ECR repos with an image). |
-| `npm run smoke` | User test of every service through the UI's own HTTP API, in the region selected in the UI, with `uitest-*` resources that it deletes afterwards (demo data is untouched): Lambda create/invoke/logs, SQS, SNS→SQS delivery, S3, Secrets, EventBridge rule→SQS delivery, Scheduler, Step Functions, Logs, DynamoDB, ECS task definition→run task→container output in CloudWatch→service, API Gateway REST (MOCK) and HTTP (→Lambda) invokes, ELB, ECR. Results go to `.data/smoke-results.json`. |
+| `npm run smoke` | User test of every service through the UI's own HTTP API, against the backend selected in Settings (or `BACKEND=floci` / `BACKEND=emulator` to switch temporarily and restore afterwards). In the region selected in the UI, with `uitest-*` resources that it deletes afterwards (demo data is untouched): Lambda create/invoke/logs, SQS, SNS→SQS delivery, S3, Secrets, EventBridge rule→SQS delivery, Scheduler, Step Functions, Logs, DynamoDB, ECS task definition→run task→container output in CloudWatch→service (a real `nginx:alpine` image on Floci), API Gateway REST (MOCK) and HTTP (→Lambda) invokes, ELB, ECR. Results go to `.data/smoke-results.json`. |
 | `npm run sfn-deep` | Step Functions deep test: Pass, Task (`lambda:invoke` and direct ARN), Choice, Wait, Parallel, Map, Succeed, Fail, Retry+Catch, SQS/SNS/DynamoDB integrations, history, stop, update, delete, EXPRESS sync runs. Results go to `.data/sfn-deep-<region>.json`. |
-| `npm run ecr-push -- <image> <repo>:<tag>` | Pushes a local Docker image to the emulator's ECR through the ECR API (`docker push` isn't supported by the emulator). |
+| `npm run ecr-push -- <image> <repo>:<tag>` | Pushes a local Docker image to the active backend's ECR. AWS Emulator has no working `docker push` (the script uses the ECR layer APIs). Floci is a real registry, so the script runs `docker login` and `docker push` to the repository URI. `BACKEND=floci` overrides the UI setting. |
 | `npm run logs-probe` | Evidence of what writes to CloudWatch Logs on its own (Lambda with and without log permissions, ECS awslogs). |
 | `npm test` | Vitest: unit tests, plus live emulator tests that are skipped when the emulator isn't running. |
 | `npm run shots` | Playwright screenshots of every page into `../aws-emulator-ui-shots` (`SHOTS_DIR` overrides). Fails on console errors or error banners. Needs `npm run seed` first and the UI running. |
@@ -241,7 +270,8 @@ browser's back button and reloads work.
 src/app/<service>/page.tsx            client pages (Gushwork components in src/components)
 src/app/api/aws/[service]/[action]    one generic POST route → service registry
 src/lib/services/*.ts                 one module per service: named actions on AWS SDK v3 clients
-src/lib/aws.ts                        endpoint, credentials (emulator run files), CA and health check
+src/lib/aws.ts                        backend, endpoint, credentials, CA and health check
+src/lib/backends.ts                   AWS Emulator and Floci presets (endpoints, health paths)
 src/lib/regions.ts                    the regions offered in the region menu
 src/lib/services/iam-role.ts          the helper role the UI uses when you don't pass one
 src/lib/compat.ts                     SDK compatibility middleware (see below)
@@ -251,9 +281,9 @@ src/lib/catalog.ts                    service catalog
 Errors are normalized to `{ name, message, status, notImplemented, connection }`. Connection problems come back
 as 502, and AWS errors come back as 200 with an `error` field so pages can render them inline.
 
-## Service support (AWS Emulator v1.0.343)
+## Service support
 
-All 13 services are implemented in the emulator (crates under `services/`) and work end to end in this UI.
+All 13 services work end to end against both backends. Notes below that mention AWS Emulator limits apply only when that backend is selected.
 
 | Service | Notes |
 |---|---|
@@ -270,7 +300,7 @@ All 13 services are implemented in the emulator (crates under `services/`) and w
 | API Gateway REST (v1) | MOCK methods get a 200 method/integration response. Use **Test invoke** on an API to call it through the emulator's data plane (`/_aws/execute-api/{id}/{stage}/{path}`). |
 | API Gateway HTTP (v2) | Routes can target a Lambda (AWS_PROXY, payload 2.0). **`ExportApi` is NotImplemented** and shows the not-supported state. |
 | ELBv2 | IP targets must sit inside the VPC CIDR (172.31.0.0/16). |
-| ECR | `docker push` to the emulator fails with `error from registry: the operation is unsupported` (login works). Push with `npm run ecr-push -- <local-image> <repo>:<tag>`, which uses the ECR layer APIs. Image scanning isn't offered: the emulator doesn't scan on push and has no vulnerability database. |
+| ECR | On AWS Emulator, `docker push` fails with `error from registry: the operation is unsupported` (login works); use `npm run ecr-push -- <local-image> <repo>:<tag>`, which uses the ECR layer APIs. On Floci, `docker push` to the repository URI works (the same script does that automatically). Image scanning isn't offered. |
 
 ### CloudWatch Logs from Lambda and ECS
 
@@ -281,21 +311,26 @@ All 13 services are implemented in the emulator (crates under `services/`) and w
   **captured by UI** wherever it's shown.
 - **ECS:** task definitions registered in the UI use the `awslogs` driver by default, with group
   `/ecs/<family>` (created for you) and the helper role as execution role (Fargate needs one for awslogs).
-  The emulator has no container runtime: it runs a container's *shell command* (`sh -c "echo …"`) and sends its
-  output to the log group, but an image's own program (nginx, node, python) doesn't run.
+  On AWS Emulator there is no container runtime: it runs a container's *shell command* (`sh -c "echo …"`) and
+  sends its output to the log group, but an image's own program (nginx, node, python) doesn't run.
+  **Floci runs real Docker containers**, so those images do run, and awslogs still land in the same group.
 
-### ECS on AWS Emulator
+### ECS on AWS Emulator vs Floci
 
 - **Network:** Fargate tasks need a route to the registry. The emulator's default VPC has no internet gateway,
   so every task used to stop with `CannotPullContainerError … i/o timeout`. When you run a task or create a
   service in the default VPC, the UI adds an internet gateway and a `0.0.0.0/0` route (once) and assigns a
   public IP. Images in this account's ECR also need pull permissions on the execution role; the helper role has them.
-- **Lifetime:** every task stops after about 10 seconds (`EssentialContainerExited`), so a service keeps
+- **Lifetime (AWS Emulator only):** every task stops after about 10 seconds (`EssentialContainerExited`), so a service keeps
   starting replacements. See them under **Tasks → Stopped**, with their stop reason.
-- **512-task limit:** the emulator holds at most 512 tasks in total, stopped ones included, and frees them only
+- **512-task limit (AWS Emulator only):** the emulator holds at most 512 tasks in total, stopped ones included, and frees them only
   when their cluster is deleted. A service left running fills that in a couple of hours, after which RunTask and
   CreateService fail with `this emulator holds at most 512 tasks; stop some before running more`. Scale services
   to 0 when you're done, or delete the cluster. The seed creates `demo-web` with a desired count of 0.
+- **Floci:** tasks run as real Docker containers for as long as the process inside them runs. A service with
+  `desiredCount: 1` keeps that many tasks and replaces a container you kill. Publish of awsvpc ports to
+  `127.0.0.1` is turned on in `start-local.sh --floci`, so you can curl the task's host port. Floci has no
+  10-second stop and no 512-task cap of the AWS Emulator kind.
 - **Regions:** cluster names are shared across regions. Creating `x` in one region when `x` exists in another
   returns the existing cluster, so the UI refuses with a clear message.
 
@@ -309,7 +344,7 @@ region; S3 buckets are global.
 
 ## Known gaps
 
-- The emulator keeps everything in memory, so restarting it wipes all resources (just run `npm run seed` again).
+- Both backends keep everything in memory by default, so restarting a backend wipes its resources (run `npm run seed` again against that backend).
 - The emulator returns epoch timestamps with nanosecond precision, which the JS SDK rejects. `src/lib/compat.ts`
   trims them to milliseconds before deserializing.
 - Create forms are deliberately minimal: Fargate/awsvpc task definitions, MOCK integrations for REST methods,

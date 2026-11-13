@@ -7,6 +7,8 @@ export async function GET() {
   const cfg = await resolveConfig();
   const health = await healthCheck(cfg);
   return jsonResponse({
+    backend: cfg.backend,
+    backendLabel: cfg.backendLabel,
     endpoint: cfg.endpoint,
     region: cfg.region,
     caLoaded: cfg.caLoaded,

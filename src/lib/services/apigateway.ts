@@ -3,23 +3,45 @@ import {
   GetDeploymentsCommand, CreateDeploymentCommand, CreateResourceCommand, PutMethodCommand, PutIntegrationCommand,
   PutMethodResponseCommand, PutIntegrationResponseCommand,
 } from '@aws-sdk/client-api-gateway';
+import http from 'node:http';
 import https from 'node:https';
+import type { BackendId } from '../backends';
 import {
   ApiGatewayV2Client, GetApisCommand, CreateApiCommand, DeleteApiCommand, GetRoutesCommand, GetStagesCommand as GetStagesV2Command,
   GetIntegrationsCommand, CreateRouteCommand, CreateStageCommand, DeleteRouteCommand, ExportApiCommand, CreateIntegrationCommand,
 } from '@aws-sdk/client-apigatewayv2';
 import { type ServiceModule, str, optStr, safeCount, decodeBytes, InputError } from './types';
 
-/** Call a deployed API through the emulator's data plane: `/_aws/execute-api/{api-id}/{stage}/{path}`. */
-function invokeDataPlane(endpoint: string, agent: https.Agent, path: string, method: string, body?: string) {
+/** Data-plane paths for a test invoke. AWS Emulator uses `/_aws/execute-api/…`; Floci uses `/restapis/…/_user_request_` and `/execute-api/…`. */
+function executePaths(backend: BackendId | undefined, id: string, stage: string, path: string): string[] {
+  if (backend === 'floci') {
+    if (stage === '$default') {
+      return [`/execute-api/${id}${path}`, `/execute-api/${id}/$default${path}`, `/_aws/execute-api/${id}${path}`];
+    }
+    return [
+      `/restapis/${id}/${encodeURIComponent(stage)}/_user_request_${path}`,
+      `/execute-api/${id}/${encodeURIComponent(stage)}${path}`,
+      `/_aws/execute-api/${id}/${encodeURIComponent(stage)}${path}`,
+    ];
+  }
+  const prefix = stage === '$default' ? `/_aws/execute-api/${id}` : `/_aws/execute-api/${id}/${encodeURIComponent(stage)}`;
+  return [`${prefix}${path}`];
+}
+
+function invokeDataPlane(endpoint: string, httpsAgent: https.Agent, path: string, method: string, body?: string) {
   return new Promise<{ status: number; headers: Record<string, string>; body: string; url: string }>((resolve, reject) => {
     const url = new URL(path, endpoint);
-    const req = https.request(url, { method, agent, headers: body ? { 'content-type': 'application/json' } : {}, timeout: 30000 }, (res) => {
-      let data = '';
-      res.setEncoding('utf8');
-      res.on('data', (d) => (data += d));
-      res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: Object.fromEntries(Object.entries(res.headers).map(([k, v]) => [k, String(v)])), body: data.slice(0, 64 * 1024), url: url.toString() }));
-    });
+    const lib = url.protocol === 'https:' ? https : http;
+    const req = lib.request(
+      url,
+      { method, agent: url.protocol === 'https:' ? httpsAgent : undefined, headers: body ? { 'content-type': 'application/json' } : {}, timeout: 30000 },
+      (res) => {
+        let data = '';
+        res.setEncoding('utf8');
+        res.on('data', (d) => (data += d));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: Object.fromEntries(Object.entries(res.headers).map(([k, v]) => [k, String(v)])), body: data.slice(0, 64 * 1024), url: url.toString() }));
+      },
+    );
     req.on('error', reject);
     req.on('timeout', () => req.destroy(new Error('Timed out after 30s')));
     if (body) req.write(body);
@@ -132,8 +154,14 @@ export const apigateway: ServiceModule = {
       const method = (optStr(p, 'method') ?? 'GET').toUpperCase();
       const path = optStr(p, 'path') ?? '/';
       if (!/^\/[\w\-./{}~%]*$/.test(path)) throw new InputError('Path must start with / and contain only URL path characters');
-      const prefix = stage === '$default' ? `/_aws/execute-api/${id}` : `/_aws/execute-api/${id}/${encodeURIComponent(stage)}`;
-      return invokeDataPlane(ctx.cfg.endpoint, ctx.cfg.httpsAgent, `${prefix}${path}`, method, optStr(p, 'body'));
+      const body = optStr(p, 'body');
+      const paths = executePaths(ctx.cfg.backend, id, stage, path);
+      let last: Awaited<ReturnType<typeof invokeDataPlane>> | undefined;
+      for (const pth of paths) {
+        last = await invokeDataPlane(ctx.cfg.endpoint, ctx.cfg.httpsAgent, pth, method, body);
+        if (last.status !== 404) return last;
+      }
+      return last!;
     },
     /** OpenAPI 3.0 export (the emulator currently answers NotImplemented — the UI shows that state). */
     async exportHttpApi(ctx, p) {

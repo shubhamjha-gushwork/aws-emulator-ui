@@ -9,7 +9,13 @@ export interface ApiError {
 }
 
 export function isNotImplemented(name: string, message: string, status?: number) {
-  return name === 'NotImplemented' || name === 'NotImplementedException' || status === 501 || /not implemented in this emulator/i.test(message);
+  return (
+    name === 'NotImplemented' ||
+    name === 'NotImplementedException' ||
+    status === 501 ||
+    /not implemented in this emulator/i.test(message) ||
+    /unknown operation/i.test(message)
+  );
 }
 
 export function normalizeError(e: unknown): ApiError {

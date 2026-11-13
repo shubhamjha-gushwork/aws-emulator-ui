@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { trimEpochPrecision } from '@/lib/compat';
 import { parseIni } from '@/lib/emulator-files';
 import { normalizeError, isNotImplemented } from '@/lib/errors';
-import { sanitizeSettings, DEFAULT_SETTINGS, endpointPort } from '@/lib/settings';
+import { sanitizeSettings, DEFAULT_SETTINGS, endpointPort, inferBackend, healthPathFor } from '@/lib/settings';
 import { toItem } from '@/lib/services/dynamodb';
 import { str, num, strList, json, InputError } from '@/lib/services/types';
 import { awsReplacer, stripMetadata } from '@/lib/serialize';
@@ -32,6 +32,7 @@ describe('errors', () => {
     expect(isNotImplemented('NotImplemented', 'x')).toBe(true);
     expect(isNotImplemented('Foo', 'x', 501)).toBe(true);
     expect(isNotImplemented('ValidationException', 'bad', 400)).toBe(false);
+    expect(isNotImplemented('Error', 'Unknown operation: GET /v2/apis/x/exports/OAS30')).toBe(true);
     const e = Object.assign(new Error('operation ExportApi is scaffolded but not implemented in this emulator'), { name: 'NotImplemented', $metadata: { httpStatusCode: 501 } });
     expect(normalizeError(e)).toMatchObject({ name: 'NotImplemented', notImplemented: true, connection: false, status: 501 });
   });
@@ -124,7 +125,26 @@ describe('settings never keep credentials', () => {
   it('drops access keys and the old manual mode', () => {
     const s = sanitizeSettings({ region: 'ap-south-1', accessKeyId: 'AKIA', secretAccessKey: 'shh', credentialsMode: 'manual' } as never);
     expect(s).toEqual({ ...DEFAULT_SETTINGS, region: 'ap-south-1' });
-    expect(Object.keys(s).sort()).toEqual(['endpoint', 'region', 'tlsVerify']);
+    expect(Object.keys(s).sort()).toEqual(['backend', 'endpoint', 'region', 'tlsVerify']);
+  });
+  it('switches to the Floci preset and back', () => {
+    const f = sanitizeSettings({ backend: 'floci' });
+    expect(f.backend).toBe('floci');
+    expect(f.endpoint).toBe('http://127.0.0.1:4566');
+    expect(f.tlsVerify).toBe(false);
+    const e = sanitizeSettings({ backend: 'emulator' }, f);
+    expect(e.backend).toBe('emulator');
+    expect(e.endpoint).toBe(DEFAULT_SETTINGS.endpoint);
+    expect(e.tlsVerify).toBe(true);
+    expect(e.region).toBe(f.region);
+  });
+  it('infers Floci from a legacy HTTP :4566 endpoint and keeps a custom emulator port', () => {
+    expect(inferBackend('http://127.0.0.1:4566')).toBe('floci');
+    expect(healthPathFor({ backend: 'floci' })).toBe('/_floci/health');
+    expect(healthPathFor({ backend: 'emulator' })).toBe('/__admin/health');
+    const custom = sanitizeSettings({ endpoint: 'https://127.0.0.1:9300' });
+    expect(custom.backend).toBe('emulator');
+    expect(custom.endpoint).toBe('https://127.0.0.1:9300');
   });
 });
 

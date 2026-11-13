@@ -15,7 +15,38 @@ import { roleOrHelper } from './iam-role';
  * logs:CreateLogGroup/CreateLogStream/PutLogEvents (as on AWS). The UI helper role does. For functions whose role
  * doesn't, invoking from the UI copies the Invoke log tail (last 4 KB) into /aws/lambda/<fn>, in a stream whose name
  * contains "captured-by-ui". Skipped when the emulator already wrote streams to that group.
+ *
+ * Floci (and some emulator cases) may return an empty Invoke LogType=Tail. In that case we read the
+ * same group and use those events as the log tail shown in the UI.
  */
+async function logsFromGroup(ctx: Ctx, fn: string): Promise<string> {
+  const group = `/aws/lambda/${fn}`;
+  const c = ctx.client(CloudWatchLogsClient);
+  try {
+    const streams = await c.send(new DescribeLogStreamsCommand({ logGroupName: group, orderBy: 'LastEventTime', descending: true, limit: 3 }));
+    const events: { timestamp?: number; message?: string }[] = [];
+    for (const s of streams.logStreams ?? []) {
+      const r = await c.send(new GetLogEventsCommand({ logGroupName: group, logStreamName: s.logStreamName!, limit: 80, startFromHead: false }));
+      events.push(...(r.events ?? []));
+    }
+    events.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+    return events.map((e) => e.message ?? '').join('');
+  } catch (e) {
+    if ((e as Error).name === 'ResourceNotFoundException') return '';
+    throw e;
+  }
+}
+
+async function logTailFromCloudWatch(ctx: Ctx, fn: string): Promise<string> {
+  // Floci writes the stream shortly after Invoke returns.
+  for (let i = 0; i < 20; i++) {
+    const text = await logsFromGroup(ctx, fn);
+    if (text.includes('START') || text.includes('REPORT') || text.trim().length > 0) return text;
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return '';
+}
+
 async function captureLogTail(ctx: Ctx, fn: string, version: string | undefined, tail: string) {
   const lines = tail.split('\n').map((l) => l.trimEnd()).filter(Boolean);
   if (!lines.length) return undefined;
@@ -118,7 +149,8 @@ export const lambda: ServiceModule = {
           await new Promise((res) => setTimeout(res, 250));
         }
       }
-      const logTail = r.LogResult ? Buffer.from(r.LogResult, 'base64').toString('utf8') : '';
+      let logTail = r.LogResult ? Buffer.from(r.LogResult, 'base64').toString('utf8') : '';
+      if (!logTail.trim()) logTail = await logTailFromCloudWatch(ctx, name);
       let captured: Awaited<ReturnType<typeof captureLogTail>>;
       let captureError: string | undefined;
       if (p.capture === undefined || bool(p, 'capture')) {

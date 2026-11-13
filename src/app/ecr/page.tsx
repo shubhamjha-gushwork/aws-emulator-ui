@@ -57,7 +57,7 @@ function RepoDetail({ repo, onDeleted }: { repo: Repo; onDeleted: () => void }) 
         <Section title={`Images${images.data ? ` (${images.data.length})` : ''}`}>
           {images.error ? <ErrorState error={images.error} compact what="DescribeImages" /> : (
             <div className="overflow-hidden rounded-lg border border-neutral-100">
-              <DataTable rows={images.data ?? []} rowKey={(i) => i.imageDigest} empty="No images. Push one with npm run ecr-push." columns={[
+              <DataTable rows={images.data ?? []} rowKey={(i) => i.imageDigest} empty="No images. Push one with npm run ecr-push (docker push also works on Floci)." columns={[
                 { key: 't', header: 'Tags', cell: (i) => <span className="flex flex-wrap gap-1">{(i.imageTags ?? ['<untagged>']).map((t) => <Pill key={t} tone="blue">{t}</Pill>)}</span> },
                 { key: 'd', header: 'Digest', cell: (i) => <span className="inline-flex items-center gap-1"><Mono>{i.imageDigest.slice(0, 19)}…</Mono><CopyButton text={i.imageDigest} /></span> },
                 { key: 's', header: 'Size', align: 'right', cell: (i) => <span className="whitespace-nowrap">{formatBytes(i.imageSizeInBytes)}</span> },

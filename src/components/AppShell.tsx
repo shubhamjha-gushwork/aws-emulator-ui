@@ -12,6 +12,8 @@ import { Pill, useInterval } from './ui';
 import { RegionPicker } from './RegionPicker';
 
 export interface Status {
+  backend?: 'emulator' | 'floci';
+  backendLabel?: string;
   endpoint: string;
   region: string;
   caLoaded: boolean;
@@ -68,7 +70,12 @@ export function AppShell({ children }: { children: ReactNode }) {
             </div>
           </Link>
           <div className="flex items-center gap-3">
-            {status ? <span className="hidden font-mono text-xs text-neutral-500 xl:inline">{status.endpoint}</span> : null}
+            {status ? (
+              <span className="hidden items-center gap-2 text-xs text-neutral-500 sm:flex">
+                <span className="font-medium text-neutral-700">{status.backendLabel ?? (status.backend === 'floci' ? 'Floci' : 'AWS Emulator')}</span>
+                <span className="hidden font-mono xl:inline">{status.endpoint}</span>
+              </span>
+            ) : null}
             {status ? <RegionPicker value={status.region} /> : null}
             <Link href="/settings" data-testid="connection-pill">
               {status === null ? (
