@@ -50,6 +50,17 @@ function looksLikeAwsEmulator(endpoint: string): boolean {
   return false;
 }
 
+const LOCAL_ENDPOINT_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', 'host.docker.internal', 'floci']);
+
+/**
+ * The endpoint switcher may only point at a local emulator, so the UI server can't be
+ * used to send requests to arbitrary hosts. Set AWS_EMULATOR_ALLOW_REMOTE_ENDPOINT=1 to opt out.
+ */
+export function isLocalEndpointHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return LOCAL_ENDPOINT_HOSTS.has(h) || h.endsWith('.localhost') || /^127\.\d+\.\d+\.\d+$/.test(h);
+}
+
 export function sanitizeSettings(input: Partial<Settings>, base: Settings = DEFAULT_SETTINGS): Settings {
   const s: Settings = { ...base, backend: 'floci', tlsVerify: false };
   const preset = backendPreset();
@@ -58,6 +69,9 @@ export function sanitizeSettings(input: Partial<Settings>, base: Settings = DEFA
   if (typeof input.endpoint === 'string' && input.endpoint.trim()) {
     const url = new URL(input.endpoint.trim()); // throws on garbage
     if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('Endpoint must be http(s)');
+    if (!isLocalEndpointHost(url.hostname) && process.env.AWS_EMULATOR_ALLOW_REMOTE_ENDPOINT !== '1') {
+      throw new Error('Endpoint must be a local host (localhost / 127.0.0.1); set AWS_EMULATOR_ALLOW_REMOTE_ENDPOINT=1 to allow others');
+    }
     const origin = url.origin;
     s.endpoint = looksLikeAwsEmulator(origin) ? preset.endpoint : origin;
   }

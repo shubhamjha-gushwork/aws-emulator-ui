@@ -31,7 +31,7 @@ type Res = { service: string; check: string; ok: boolean; note?: string };
 const results: Res[] = [];
 
 async function call<T = unknown>(service: string, action: string, params: Record<string, unknown> = {}): Promise<T> {
-  const r = await fetch(`${UI}/api/aws/${service}/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(params) });
+  const r = await fetch(`${UI}/api/aws/${service}/${action}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: UI }, body: JSON.stringify(params) });
   const body = (await r.json()) as { data?: T; error?: { name: string; message: string; notImplemented: boolean } };
   if (body.error) throw Object.assign(new Error(`${body.error.name}: ${body.error.message}`), body.error);
   return body.data as T;
