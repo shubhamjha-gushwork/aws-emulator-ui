@@ -34,6 +34,28 @@ open http://127.0.0.1:3297
 The UI only listens on `127.0.0.1:3297`. All AWS calls happen server-side with AWS SDK v3, so credentials
 never reach the browser.
 
+### One-command start/stop (macOS, Linux)
+
+```bash
+scripts/start-local.sh            # start the emulator + UI (add --seed for demo data, --rebuild to rebuild the image)
+scripts/stop-local.sh             # stop the UI and the emulator (this wipes emulator state)
+scripts/stop-local.sh --ui-only   # stop only the UI
+```
+
+- **macOS / Windows:** the emulator runs in Docker, following the official
+  [Getting started with Docker](https://docs.aws.amazon.com/emulator/latest/userguide/getting-started-docker.html) guide.
+  The image comes from `docker/Dockerfile` and is built on first run (Arm or x86 package picked automatically).
+  The container is named `aws-emulator`, publishes `127.0.0.1:9297` only, and is capped at 2 GiB of memory.
+  It runs with `-e HOME=$HOME -v ~/.aws/emulator:~/.aws/emulator`, so its per-run keys and CA land in
+  `~/.aws/emulator/9297/` on your machine. That's where the UI's **Auto** credentials mode looks, so no extra setup is needed.
+  You need Docker Desktop (or another Docker runtime) running.
+- **Linux:** uses the installed `aws-emulator` binary if there is one (`USE_DOCKER=1` forces Docker).
+- The UI runs in the background on `127.0.0.1:3297` (`npm install`/`npm run build` happen first if needed).
+  Logs go to `~/Library/Logs/aws-emulator-ui/ui.log` on macOS and `.data/logs/` elsewhere.
+  Emulator logs: `docker logs aws-emulator`.
+- Overrides: `AWS_EMULATOR_PORT`, `UI_PORT`, `AWS_EMULATOR_CONTAINER`, `AWS_EMULATOR_IMAGE`, `LOG_DIR`.
+- Nothing starts automatically at login.
+
 ### Credentials and TLS
 
 The emulator runs with `--auth on` by default and writes fresh SigV4 keys and a CA certificate on each start, to
