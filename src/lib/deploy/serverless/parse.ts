@@ -387,12 +387,39 @@ export function planServerless(parsed: ParsedServerless, opts: { noRun?: boolean
   };
   const pseudo = { region: parsed.region, stackName: `${parsed.service}-${parsed.stage}` };
   const buses = new Set<string>();
-  const showArn = (v: unknown) => {
-    if (typeof v === 'string') return v;
-    const r = resolveIntrinsic(v, {}, pseudo);
-    if (typeof r === 'string') return r;
-    const id = refTarget(v);
-    return id ? `${id} (from this stack)` : JSON.stringify(v);
+  // Queue names apply can resolve an SQS trigger to: CloudFormation queues and lift queues/DLQs in this stack.
+  const stackQueues = new Set<string>();
+  for (const [logical, r] of Object.entries(parsed.cfnResources)) {
+    if (r.Type !== 'AWS::SQS::Queue') continue;
+    const n = cfnPhysicalName(logical, r, pseudo);
+    if (n) stackQueues.add(n);
+  }
+  for (const q of parsed.liftQueues) {
+    stackQueues.add(q.queueName);
+    stackQueues.add(liftDlqName(q.queueName, !!q.fifo));
+  }
+  /** Label for an SQS trigger source, or undefined when apply cannot resolve it (the mapping would be skipped). */
+  const sqsSource = (v: unknown): string | undefined => {
+    if (v instanceof SecretBag || v === undefined || v === null) return undefined;
+    if (typeof v !== 'string') {
+      const r = resolveIntrinsic(v, {}, pseudo);
+      if (typeof r === 'string') return r;
+      const id = refTarget(v);
+      return id ? `${id} (from this stack)` : undefined;
+    }
+    const t = v.trim();
+    if (t.startsWith('arn:')) return t;
+    const construct = t.match(/^__CONSTRUCT__:([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)$/);
+    if (construct) {
+      const q = parsed.liftQueues.find((x) => x.name === construct[1]);
+      if (!q) return undefined;
+      return `${construct[2] === 'dlqArn' ? liftDlqName(q.queueName, !!q.fifo) : q.queueName} (lift construct in this stack)`;
+    }
+    const att = t.match(/^([A-Za-z0-9]+)\.(Arn|ARN)$/);
+    if (att && parsed.cfnResources[att[1]]) return `${att[1]} (from this stack)`;
+    if ((t.startsWith('{') && t.endsWith('}')) || t.startsWith('[')) return t;
+    if (stackQueues.has(t)) return `${t} (from this stack)`;
+    return undefined;
   };
 
   for (const s of collectSecrets(parsed.ctx)) add('secret', s.name, s.keys.length ? `keys: ${s.keys.join(', ')}` : 'placeholder JSON (keys discovered at interpolate time)');
@@ -436,7 +463,15 @@ export function planServerless(parsed: ParsedServerless, opts: { noRun?: boolean
           add('event-rule', scheduleRuleName(fn.deployedName, sched++), [rate, off ? `DISABLED${opts.noRun ? ' (--no-run)' : ' (enabled: false)'}` : ''].filter(Boolean).join(' · '));
         }
       }
-      if (ev.sqs) add('event-source-mapping', `${fn.deployedName} ← ${showArn(ev.sqs.arn)}`, noRunDetail(!!opts.noRun, 'SQS trigger'));
+      if (ev.sqs) {
+        const src = sqsSource(ev.sqs.arn);
+        if (src) add('event-source-mapping', `${fn.deployedName} ← ${src}`, noRunDetail(!!opts.noRun, 'SQS trigger'));
+        else {
+          // The value may come from an env file, so it is never printed.
+          const why = ev.sqs.arn === PLACEHOLDER || ev.sqs.arn instanceof SecretBag ? 'comes from a secret or variable with no local value' : 'is not an ARN or a queue in this stack';
+          warnings.push(`${fn.name}: SQS trigger source ${why}; the mapping will be skipped on deploy`);
+        }
+      }
       if (ev.s3) add('s3', ev.s3.bucket, opts.noRun ? `${ev.s3.event} · notification skipped (--no-run)` : ev.s3.event);
       const bus = ev.eventBridge ? busName(ev.eventBridge) : 'default';
       if (bus !== 'default' && !buses.has(bus)) {

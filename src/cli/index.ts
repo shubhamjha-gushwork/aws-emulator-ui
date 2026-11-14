@@ -222,6 +222,7 @@ async function main() {
       const r = await destroyById(o, m.id);
       console.log(`  removed ${r.ok.length}, failed ${r.failed.length}`);
       for (const f of r.failed) console.log(`  ! ${f.name}: ${f.error}`);
+      for (const k of r.kept) console.log(`  kept ${k}`);
     }
     return;
   }

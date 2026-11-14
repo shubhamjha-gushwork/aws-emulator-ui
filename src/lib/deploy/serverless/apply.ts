@@ -21,9 +21,10 @@ import { CreateApiCommand, GetApisCommand, CreateIntegrationCommand, CreateRoute
 import { CreateStateMachineCommand, ListStateMachinesCommand, UpdateStateMachineCommand } from '@aws-sdk/client-sfn';
 import type { DeployClients } from '../client';
 import { resourceTags, rethrowIfDown } from '../client';
-import { PLACEHOLDER_VALUE, uiHref, type DeployManifest, type ManifestResource, type Plan } from '../types';
+import { uiHref, type DeployManifest, type ManifestResource, type Plan } from '../types';
+import { upsertPlaceholderSecret } from '../secrets';
 import { collectSecrets, resolveConstructTokens } from '../interpolate';
-import { buildSecretPayload, classifyKeys, fillPlaceholderEnv, type EnvMap } from '../envfile';
+import { classifyKeys, fillPlaceholderEnv, type EnvMap } from '../envfile';
 import { triggerEnabled, triggerState } from '../run-mode';
 import { decodeIntrinsic, LIMITS, orderByDependencies, referencedIds, resolveIntrinsic, type LogicalMap, type PseudoParams } from '../cfn';
 import { packageFunction } from './package';
@@ -60,11 +61,12 @@ export async function applyServerless(
   const stillMissing: { name: string; keys: string[] }[] = [];
   for (const s of collectSecrets(parsed.ctx)) {
     const keys = s.keys.length ? s.keys : ['VALUE'];
-    const payload = buildSecretPayload(keys, fileEnv);
-    await upsertSecret(clients, s.name, payload.secretString);
+    // Merge into an existing secret: shared secrets and hand-filled values survive a redeploy.
+    const payload = await upsertPlaceholderSecret(clients, s.name, keys, fileEnv, 'Placeholder created by aws-emulator deploy. Fill in real values locally. Never sourced from real AWS.');
     filledFromEnv.push(...payload.filled);
     const classified = classifyKeys(keys, fileEnv, s.defaulted);
-    if (classified.missing.length) stillMissing.push({ name: s.name, keys: classified.missing });
+    const missing = classified.missing.filter((k) => !payload.kept.includes(k));
+    if (missing.length) stillMissing.push({ name: s.name, keys: missing });
     resources.push({ kind: 'secret', name: s.name, href: uiHref('secret') });
   }
 
@@ -209,7 +211,8 @@ export async function applyServerless(
             await upsertMapping(clients, arn, srcArn, ev.sqs.batchSize, ev.sqs.maximumConcurrency, noRun || ev.sqs.enabled === false);
             resources.push({ kind: 'event-source-mapping', name: `${fn.deployedName}`, arn: srcArn, extra: { function: fn.deployedName }, href: uiHref('event-source-mapping') });
           } else {
-            warn(`${fn.name}: could not resolve SQS arn ${typeof ev.sqs.arn === 'string' ? ev.sqs.arn : JSON.stringify(ev.sqs.arn)}`);
+            // Deterministic (matches the plan's warning), so it must not read as a failure that blocks pruning. Value not printed.
+            warn(`${fn.name}: SQS trigger source is not an ARN or a queue in this stack; mapping skipped`);
           }
         }
         if (ev.s3 && ev.s3.bucket) {
@@ -422,7 +425,8 @@ async function upsertCfn(
     }
     case 'AWS::SecretsManager::Secret': {
       const secretString = p.SecretString === undefined ? undefined : val(p.SecretString);
-      await upsertSecret(c, name, secretString ?? JSON.stringify({ VALUE: PLACEHOLDER_VALUE }));
+      if (secretString !== undefined) await upsertSecret(c, name, secretString);
+      else await upsertPlaceholderSecret(c, name, [], {}, 'Placeholder created by aws-emulator deploy. Fill in real values locally. Never sourced from real AWS.');
       return { logicalId, name, kind: 'secret' };
     }
     case 'AWS::Logs::LogGroup': {

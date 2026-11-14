@@ -12,6 +12,8 @@ export class SecretBag {
   readonly name: string;
   readonly source: string;
   readonly keys = new Set<string>();
+  /** True once a variable reads this secret (a key, or the whole secret). Unreferenced Trinity refs are not created. */
+  referenced = false;
   /** Local --env-file values only (never process.env). Used so YAML defaults do not hide a present key. */
   readonly fileEnv: NodeJS.Dict<string>;
   constructor(name: string, source: string, fileEnv?: NodeJS.Dict<string>) {
@@ -21,6 +23,7 @@ export class SecretBag {
   }
   get(key: string): string | typeof MISSING_SECRET {
     this.keys.add(key);
+    this.referenced = true;
     if (Object.prototype.hasOwnProperty.call(this.fileEnv, key)) {
       const v = this.fileEnv[key];
       if (v !== undefined && v !== '') return v;
@@ -234,6 +237,7 @@ function resolveExpr(expr: string, ctx: InterpCtx): unknown {
   if (ctx.circular.has(pathStr)) return def !== undefined ? maybeInterpDefault(def, ctx) : `\${${expr}}`;
   try {
     let v = resolvePath(pathStr, ctx);
+    if (v instanceof SecretBag) v.referenced = true;
     // A referenced value may itself contain variables that have not been walked yet (forward reference).
     if (typeof v === 'string' && v.includes('${')) {
       if (ctx.resolving.has(pathStr)) {
@@ -265,6 +269,9 @@ function resolveExpr(expr: string, ctx: InterpCtx): unknown {
       }
       if (v !== '' && (kind === 'self' || kind === 'opt' || kind === 'sls' || kind === 'cf' || kind === 's3' || kind === 'param')) {
         addWarning(ctx, `\${${pathStr}} could not be resolved (no value and no default)`);
+      } else if (v === undefined && kind === '' && isDocumentPath(pathStr, ctx)) {
+        // Bare Trinity paths (custom.x, environment.refs.y.KEY) used to vanish silently, dropping env vars.
+        addWarning(ctx, `\${${pathStr}} could not be resolved (no value and no default)`);
       }
       return v;
     }
@@ -275,6 +282,12 @@ function resolveExpr(expr: string, ctx: InterpCtx): unknown {
     if (e instanceof CircularReference && def !== undefined) return maybeInterpDefault(def, ctx);
     return `\${${expr}}`;
   }
+}
+
+/** A bare dotted path whose first segment is a top-level key of the document (custom.x, environment.refs.y). */
+function isDocumentPath(p: string, ctx: InterpCtx): boolean {
+  if (!/^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+$/.test(p)) return false;
+  return Object.prototype.hasOwnProperty.call(ctx.root, p.split('.')[0]);
 }
 
 function maybeInterpDefault(def: string, ctx: InterpCtx): unknown {
@@ -406,6 +419,11 @@ export function resolveConstructTokens<T>(value: T, ctx: InterpCtx): T {
 }
 
 
+/** Secrets promoted from environment.refs that no variable reads; they are not created. Names only. */
+export function unreferencedSecrets(ctx: InterpCtx): string[] {
+  return [...ctx.secrets.values()].filter((b) => b.source === 'secretsmanager' && !b.referenced && b.keys.size === 0).map((b) => b.name);
+}
+
 /**
  * Turn Secrets Manager ARNs / ssm paths written as plain strings
  * (common in Trinity environment.refs) into SecretBags so key lookups are tracked.
@@ -460,7 +478,9 @@ function secretBagFromRefString(raw: string, ctx: InterpCtx): SecretBag | undefi
 }
 
 export function collectSecrets(ctx: InterpCtx): { name: string; keys: string[]; source: string; defaulted: string[] }[] {
-  return [...ctx.secrets.values()].map((b) => ({
+  // Secrets promoted from Trinity environment.refs are only created when something reads them
+  // (e.g. a prod-only ref is not created for a local deploy).
+  return [...ctx.secrets.values()].filter((b) => b.source !== 'secretsmanager' || b.referenced || b.keys.size > 0).map((b) => ({
     name: b.name,
     keys: [...b.keys].sort(),
     source: b.source,

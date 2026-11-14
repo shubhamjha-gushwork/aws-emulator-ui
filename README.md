@@ -172,8 +172,8 @@ A directory is scanned for `serverless.yml` / `serverless.yaml`, `trinity.yml` /
 - `stacks.HTTPApi`: ECR repo, `docker build` + `docker push` to Floci ECR (see `--no-build`), ECS cluster, task definition (image, ports, env, awslogs), service (`desiredCount`), ALB + target group + listener when `appPort` is set.
 - `stacks.Fargate`: the same without a load balancer, unless a port is set.
 - `stacks.ScheduledFargate`: cluster, task definition, EventBridge schedule. If there is no Dockerfile, a slim Python image is generated from the task `handler`.
-- `${custom.stage}` and `${custom.${custom.stage}.…}` with a fallback to `custom.dev` when `custom.<stage>` is missing (so `--stage local` still picks up a `dev` block).
-- `${environment.refs…}` becomes placeholder secrets, same as SSM above.
+- `${custom.stage}` and `${custom.${custom.stage}.…}` with a fallback to `custom.dev` when `custom.<stage>` is missing (so `--stage local` still picks up a `dev` block), or to the only stage block when there is no `dev` one. The plan prints a warning when a fallback is used.
+- `${environment.refs…}` becomes placeholder secrets, same as SSM above. Stage-keyed refs such as `secretsdev` / `appSecrets-prod` used as `${environment.refs.secrets${custom.stage}.KEY}` fall back the same way. Refs that no variable reads for the chosen stage are not created, and unresolved paths are reported instead of being dropped.
 - `buildArgs` / `dockerBuildArgs` (map or `KEY=VALUE` list) are passed to `docker build`. A missing Dockerfile is reported before anything is created; stacks of unknown types without a Dockerfile are skipped.
 - Custom domains, ACM, Route 53, autoscaling and IAM statements are not created. Multi-region stacks deploy only the requested region.
 
@@ -183,7 +183,9 @@ A directory is scanned for `serverless.yml` / `serverless.yaml`, `trinity.yml` /
 - Container-image Lambdas (`provider.ecr` / `image:`) are not packaged.
 - `serverless-offline`, tracing, and prune plugins are ignored.
 - Placeholder secrets contain the literal value `PLACEHOLDER — set this value in Floci Secrets Manager` unless a local `--env-file` (or `.env.local` / `.env`) provides the same key names. Values from that file are written only to Floci Secrets Manager and to the function/task environment; they are never printed and never read from real AWS.
-- Idempotent re-deploy updates existing functions, queues, services and so on rather than failing. `destroy` removes what that deploy recorded (by id, tagged where the API accepts tags).
+- Idempotent re-deploy updates existing functions, queues, services and so on rather than failing. `destroy` removes what that deploy recorded (by id, tagged where the API accepts tags), except resources another recorded deploy in the same region also uses (for example one secret shared by several repos); those are kept and listed.
+- Placeholder secrets are merged, not overwritten: keys used by other configs and values you filled in by hand stay; the env file wins for its keys.
+- An SQS trigger whose source is not an ARN or a queue in the same stack (for example a queue ARN kept in a secret) is reported in the plan and skipped.
 - API routes removed from the YAML stay on the REST / HTTP API after a redeploy (the API itself is pruned when it is no longer used).
 - Layers, authorizers, `websocket`, `alb`, `stream`, `cloudwatchLog` and state-machine events are reported and not created.
 - A plain `${ssm:/param}` (not a Secrets Manager reference) is emulated as a Secrets Manager secret with a `VALUE` key.

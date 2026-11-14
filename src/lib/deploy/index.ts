@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { detectConfigs, type DetectedConfig } from './detect';
 import { makeClients, type DeployClients } from './client';
-import { dedupeResources, destroyResources, resourceKey } from './destroy';
+import { dedupeResources, destroyResources, resourceKey, splitShared } from './destroy';
 import { listManifests, readManifest, writeManifest } from './state';
 import { manifestId, type ConfigKind, type DeployManifest, type DeployOptions, type ManifestResource, type Plan } from './types';
 import { parseServerlessFile, planServerless } from './serverless/parse';
@@ -72,7 +72,7 @@ async function run(opts: DeployOptions, dry: boolean): Promise<RunResult> {
       const tracked = checkpointed({ id, kind: 'serverless', service: parsed.service, stage: parsed.stage, region: parsed.region, source: cfg.file }, existing);
       const { plan, manifest } = await withPartialHint(id, tracked, () =>
         applyServerless(clients, parsed, { dryRun: false, id, source: sourceLabel, fileEnv: loaded.env, noRun: opts.noRun, resources: tracked, previous: existing?.resources }));
-      if (manifest) manifests.push(await finalize(clients, manifest, existing, plan));
+      if (manifest) manifests.push(await finalize(clients, manifest, existing, plan, parsed.warnings));
       plans.push(annotatePlan(plan, loaded.env));
     } else {
       const parsed = parseTrinityFile(cfg.file, parseOpts);
@@ -95,7 +95,7 @@ async function run(opts: DeployOptions, dry: boolean): Promise<RunResult> {
           noRun: opts.noRun,
           resources: tracked,
         }));
-      if (manifest) manifests.push(await finalize(clients, manifest, existing, plan));
+      if (manifest) manifests.push(await finalize(clients, manifest, existing, plan, parsed.warnings));
       plans.push(annotatePlan(plan, loaded.env));
     }
   }
@@ -157,14 +157,24 @@ async function withPartialHint<T>(id: string, tracked: ManifestResource[], fn: (
   }
 }
 
+/** Failures during this deploy only; parse-time notes like "could not be resolved" must not block pruning. */
+export function deployHadFailures(planWarnings: string[], parseWarnings: string[]): boolean {
+  const parsed = new Set(parseWarnings);
+  return planWarnings.some((w) => !parsed.has(w) && /failed|could not/i.test(w));
+}
+
 /** Dedupe, remove what a redeploy no longer creates (like CloudFormation), then write the final manifest. */
-async function finalize(clients: DeployClients, manifest: DeployManifest, existing: DeployManifest | undefined, plan: Plan): Promise<DeployManifest> {
+async function finalize(clients: DeployClients, manifest: DeployManifest, existing: DeployManifest | undefined, plan: Plan, parseWarnings: string[] = []): Promise<DeployManifest> {
   manifest.resources = dedupeResources(manifest.resources);
   if (existing) {
     manifest.createdAt = existing.createdAt;
     const keep = new Set(manifest.resources.map(resourceKey));
-    const stale = dedupeResources(existing.resources).filter((r) => !keep.has(resourceKey(r)));
-    const hadFailures = plan.warnings.some((w) => /failed|could not/i.test(w));
+    const allStale = dedupeResources(existing.resources).filter((r) => !keep.has(resourceKey(r)));
+    // Resources another deployment also records (a shared secret, cluster, …) are dropped from this manifest, not deleted.
+    const { own: stale, shared } = splitShared(allStale, manifest.id, manifest.region);
+    if (shared.length) plan.warnings.push(`left ${shared.length} resource(s) no longer in this config because another deployment uses them: ${shared.map((s) => s.resource.name).join(', ')}`);
+    // Only failures during this deploy count; parse-time notes like "could not be resolved" must not block pruning.
+    const hadFailures = deployHadFailures(plan.warnings, parseWarnings);
     if (stale.length && hadFailures) {
       plan.warnings.push(`kept ${stale.length} resource(s) from the previous deploy because some resources failed this time: ${stale.map((r) => r.name).join(', ')}`);
       manifest.resources.push(...stale);

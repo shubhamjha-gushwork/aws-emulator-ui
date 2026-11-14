@@ -16,11 +16,34 @@ import { DeleteRepositoryCommand } from '@aws-sdk/client-ecr';
 import { DeleteLoadBalancerCommand, DeleteTargetGroupCommand, DeleteListenerCommand, DescribeListenersCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
 import type { DeployClients } from './client';
 import { makeClients } from './client';
-import { deleteManifest, readManifest, writeManifest } from './state';
+import { deleteManifest, listManifests, readManifest, writeManifest } from './state';
 import type { DeployManifest, DeployOptions, ManifestResource } from './types';
 
-export async function destroyManifest(clients: DeployClients, manifest: DeployManifest): Promise<{ ok: string[]; failed: { name: string; error: string }[] }> {
-  return destroyResources(clients, manifest.resources);
+export async function destroyManifest(clients: DeployClients, manifest: DeployManifest): Promise<{ ok: string[]; failed: { name: string; error: string }[]; kept: string[] }> {
+  const { own, shared } = splitShared(manifest.resources, manifest.id, manifest.region);
+  const r = await destroyResources(clients, own);
+  return { ...r, kept: shared.map((s) => `${s.resource.kind}:${s.resource.name} (also in ${s.by})`) };
+}
+
+/**
+ * Separate resources another recorded deployment in the same region also lists (e.g. one secret
+ * shared by several repos, or two configs on one cluster). Deleting those would break the other deploy.
+ */
+export function splitShared(resources: ManifestResource[], selfId: string, region: string | undefined, manifests: DeployManifest[] = listManifests()): { own: ManifestResource[]; shared: { resource: ManifestResource; by: string }[] } {
+  const reg = region || 'us-east-1';
+  const usedBy = new Map<string, string>();
+  for (const m of manifests) {
+    if (m.id === selfId || (m.region || 'us-east-1') !== reg) continue;
+    for (const r of m.resources) if (!usedBy.has(resourceKey(r))) usedBy.set(resourceKey(r), m.id);
+  }
+  const own: ManifestResource[] = [];
+  const shared: { resource: ManifestResource; by: string }[] = [];
+  for (const r of resources) {
+    const by = usedBy.get(resourceKey(r));
+    if (by) shared.push({ resource: r, by });
+    else own.push(r);
+  }
+  return { own, shared };
 }
 
 /** Identity of a manifest entry; used to dedupe and to find resources a redeploy no longer creates. */

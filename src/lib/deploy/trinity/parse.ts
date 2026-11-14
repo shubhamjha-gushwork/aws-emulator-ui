@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { collectSecrets, createCtx, interpolateTree, promoteSecretsManagerRefs, type InterpCtx } from '../interpolate';
+import { collectSecrets, createCtx, interpolateTree, promoteSecretsManagerRefs, unreferencedSecrets, type InterpCtx } from '../interpolate';
 import { loadYaml } from '../yaml';
 import { type Plan, type PlannedResource, type ResourceKind, uiHref } from '../types';
 import { noRunDetail, serviceDesiredCount } from '../run-mode';
@@ -80,11 +80,22 @@ export function parseTrinityFile(file: string, opts: { stage: string; region: st
   const root = path.dirname(file);
   // Inject custom.stage and fall back to custom.dev when custom.<stage> is missing.
   const custom = rec(doc.custom);
+  const stageBlocks = Object.keys(custom).filter((k) => k !== 'stage' && k !== opts.stage && custom[k] && typeof custom[k] === 'object');
+  const refFallbacks: string[] = [];
   if (custom[opts.stage] === undefined && custom.dev !== undefined) {
     custom[opts.stage] = custom.dev;
+  } else if (custom[opts.stage] === undefined) {
+    // No dev block: use the only stage block there is (e.g. a prod-only file), and say so.
+    const only = stageBlocks.filter((k) => COMMON_STAGES.includes(k));
+    if (only.length === 1) {
+      custom[opts.stage] = custom[only[0]];
+      refFallbacks.push(`custom.${opts.stage} is not defined; using custom.${only[0]} for stage ${opts.stage}`);
+    }
   }
   custom.stage = opts.stage;
   doc.custom = custom;
+  const env0 = rec(doc.environment);
+  refFallbacks.push(...aliasStageRefs(rec(env0.refs), opts.stage, stageBlocks));
 
   const ctx = createCtx({ stage: opts.stage, region: opts.region, accountId: opts.accountId, root: doc, fileBase: root, env: opts.env, fileEnv: opts.fileEnv });
   if (doc.custom) interpolateTree(doc.custom, ctx);
@@ -93,7 +104,8 @@ export function parseTrinityFile(file: string, opts: { stage: string; region: st
   promoteSecretsManagerRefs(refs, ctx);
   interpolateTree(doc, ctx);
 
-  const warnings = [...ctx.warnings];
+  const warnings = [...refFallbacks, ...ctx.warnings];
+  for (const name of unreferencedSecrets(ctx)) warnings.push(`secret ${name} is not referenced by any variable for stage ${opts.stage}; not created`);
   const unsupported: string[] = [];
   const name = str(doc.name) || path.basename(root);
   // --region wins; otherwise the file's region, then the default.
@@ -126,6 +138,35 @@ export function parseTrinityFile(file: string, opts: { stage: string; region: st
   }
 
   return { name, file, root, stage: opts.stage, region, environment: envVars, stacks, ctx, warnings, unsupported };
+}
+
+const COMMON_STAGES = ['dev', 'prod', 'production', 'staging', 'stage', 'test', 'qa', 'uat'];
+
+/**
+ * environment.refs keyed by stage (`secretsdev`, `appSecrets-prod`) referenced as
+ * `${environment.refs.secrets${custom.stage}.KEY}`: when the requested stage has no ref, reuse the dev
+ * one (like custom.<stage> → custom.dev), or the only one there is. Without this every such env var
+ * silently disappeared. Mutates refs; returns warnings (names only).
+ */
+export function aliasStageRefs(refs: Record<string, unknown>, stage: string, stageBlocks: string[]): string[] {
+  const suffixes = [...new Set([...stageBlocks, ...COMMON_STAGES])].filter((s) => s && s !== stage).sort((a, b) => b.length - a.length);
+  const groups = new Map<string, { key: string; suffix: string }[]>();
+  for (const key of Object.keys(refs)) {
+    const suffix = suffixes.find((s) => key.length > s.length && key.endsWith(s));
+    if (!suffix) continue;
+    const prefix = key.slice(0, -suffix.length);
+    groups.set(prefix, [...(groups.get(prefix) ?? []), { key, suffix }]);
+  }
+  const warnings: string[] = [];
+  for (const [prefix, list] of groups) {
+    const target = `${prefix}${stage}`;
+    if (refs[target] !== undefined) continue;
+    const pick = list.find((c) => c.suffix === 'dev') ?? (list.length === 1 ? list[0] : undefined);
+    if (!pick) continue;
+    refs[target] = refs[pick.key];
+    warnings.push(`environment.refs.${target} is not defined; using environment.refs.${pick.key} for stage ${stage}`);
+  }
+  return warnings;
 }
 
 function arr(v: unknown): string[] | undefined {

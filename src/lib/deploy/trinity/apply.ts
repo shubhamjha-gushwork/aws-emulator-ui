@@ -4,7 +4,6 @@ import os from 'os';
 import path from 'path';
 import { CreateRepositoryCommand, DescribeRepositoriesCommand, GetAuthorizationTokenCommand } from '@aws-sdk/client-ecr';
 import { CreateClusterCommand, RegisterTaskDefinitionCommand, CreateServiceCommand, UpdateServiceCommand, DescribeServicesCommand } from '@aws-sdk/client-ecs';
-import { CreateSecretCommand, DescribeSecretCommand, PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { CreateLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
 import {
   CreateLoadBalancerCommand, CreateTargetGroupCommand, CreateListenerCommand,
@@ -14,8 +13,9 @@ import { DescribeVpcsCommand as DescribeEc2VpcsCommand, DescribeSubnetsCommand a
 import { PutRuleCommand, PutTargetsCommand } from '@aws-sdk/client-eventbridge';
 import type { DeployClients } from '../client';
 import { resourceTags } from '../client';
+import { upsertPlaceholderSecret } from '../secrets';
 import { collectSecrets } from '../interpolate';
-import { buildSecretPayload, classifyKeys, fillPlaceholderEnv, type EnvMap } from '../envfile';
+import { classifyKeys, fillPlaceholderEnv, type EnvMap } from '../envfile';
 import { uiHref, type DeployManifest, type ManifestResource, type Plan } from '../types';
 import { planTrinity, trinityNames, trinityPort, type ParsedTrinity, type TrinityTask } from './parse';
 import { fitFargateResources } from './fargate';
@@ -51,11 +51,12 @@ export async function applyTrinity(
   const stillMissing: { name: string; keys: string[] }[] = [];
   for (const s of collectSecrets(parsed.ctx)) {
     const keys = s.keys.length ? s.keys : ['VALUE'];
-    const payload = buildSecretPayload(keys, fileEnv);
-    await upsertSecret(clients, s.name, payload.secretString);
+    // Merge into an existing secret: shared secrets and hand-filled values survive a redeploy.
+    const payload = await upsertPlaceholderSecret(clients, s.name, keys, fileEnv, 'Placeholder created by aws-emulator deploy. Fill in real values locally.');
     filledFromEnv.push(...payload.filled);
     const classified = classifyKeys(keys, fileEnv, s.defaulted);
-    if (classified.missing.length) stillMissing.push({ name: s.name, keys: classified.missing });
+    const missing = classified.missing.filter((k) => !payload.kept.includes(k));
+    if (missing.length) stillMissing.push({ name: s.name, keys: missing });
     resources.push({ kind: 'secret', name: s.name, href: uiHref('secret') });
   }
 
@@ -184,15 +185,6 @@ export async function applyTrinity(
       warnings: [...plan.warnings, ...plan.unsupported],
     },
   };
-}
-
-async function upsertSecret(c: DeployClients, name: string, value: string) {
-  try {
-    await c.secrets.send(new DescribeSecretCommand({ SecretId: name }));
-    await c.secrets.send(new PutSecretValueCommand({ SecretId: name, SecretString: value }));
-  } catch {
-    await c.secrets.send(new CreateSecretCommand({ Name: name, SecretString: value, Description: 'Placeholder created by aws-emulator deploy. Fill in real values locally.' }));
-  }
 }
 
 async function ensureImage(c: DeployClients, parsed: ParsedTrinity, task: TrinityTask, repo: string, noBuild: boolean, plan: Plan, onRepo: () => void): Promise<string> {
