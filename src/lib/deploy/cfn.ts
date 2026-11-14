@@ -204,4 +204,70 @@ export function fitName(name: string, max: number): string {
   return `${name.slice(0, max - 9).replace(/[-_.]+$/, '')}-${hash}`;
 }
 
-export const LIMITS = { lambda: 64, sqs: 80, rule: 64, sfn: 80, alb: 32, targetGroup: 32 } as const;
+interface NameRule {
+  /** Shown in messages, e.g. "Lambda function name … (Lambda limit 64)". */
+  label: string;
+  service: string;
+  min?: number;
+  max: number;
+  pattern: RegExp;
+}
+
+const ECS_NAME = /^[a-zA-Z0-9_-]+$/;
+const ELB_NAME = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/;
+
+/**
+ * AWS naming rules (length and allowed characters) per resource kind, from each service's API reference.
+ * Names written in the YAML that break them are reported and skipped, as AWS would reject them; names this
+ * tool generates are shortened with fitName so they always fit.
+ */
+export const NAME_RULES = {
+  lambda: { label: 'Lambda function', service: 'Lambda', max: 64, pattern: /^[a-zA-Z0-9_-]+$/ },
+  sqs: { label: 'SQS queue', service: 'SQS', max: 80, pattern: /^[a-zA-Z0-9_-]+(\.fifo)?$/ },
+  sns: { label: 'SNS topic', service: 'SNS', max: 256, pattern: /^[a-zA-Z0-9_-]+(\.fifo)?$/ },
+  rule: { label: 'EventBridge rule', service: 'EventBridge', max: 64, pattern: /^[.\-_A-Za-z0-9]+$/ },
+  eventBus: { label: 'EventBridge event bus', service: 'EventBridge', max: 256, pattern: /^[/.\-_A-Za-z0-9]+$/ },
+  sfn: { label: 'state machine', service: 'Step Functions', max: 80, pattern: /^[^\s<>{}[\]?*"#%\\^|~`$&,;:/\u0000-\u001f\u007f-\u009f]+$/ },
+  dynamodb: { label: 'DynamoDB table', service: 'DynamoDB', min: 3, max: 255, pattern: /^[a-zA-Z0-9_.-]+$/ },
+  s3: { label: 'S3 bucket', service: 'S3', min: 3, max: 63, pattern: /^[a-z0-9][a-z0-9.-]*[a-z0-9]$/ },
+  logGroup: { label: 'log group', service: 'CloudWatch Logs', max: 512, pattern: /^[.\-_/#A-Za-z0-9]+$/ },
+  secret: { label: 'secret', service: 'Secrets Manager', max: 512, pattern: /^[A-Za-z0-9/_+=.@-]+$/ },
+  ecsCluster: { label: 'ECS cluster', service: 'ECS', max: 255, pattern: ECS_NAME },
+  ecsService: { label: 'ECS service', service: 'ECS', max: 255, pattern: ECS_NAME },
+  taskFamily: { label: 'task definition family', service: 'ECS', max: 255, pattern: ECS_NAME },
+  ecr: { label: 'ECR repository', service: 'ECR', min: 2, max: 256, pattern: /^(?:[a-z0-9]+(?:[._-][a-z0-9]+)*\/)*[a-z0-9]+(?:[._-][a-z0-9]+)*$/ },
+  alb: { label: 'load balancer', service: 'ELB', max: 32, pattern: ELB_NAME },
+  targetGroup: { label: 'target group', service: 'ELB', max: 32, pattern: ELB_NAME },
+} satisfies Record<string, NameRule>;
+
+export type NameKind = keyof typeof NAME_RULES;
+
+/** Length limits only, by kind. */
+export const LIMITS = Object.fromEntries(Object.entries(NAME_RULES).map(([k, r]) => [k, r.max])) as { [K in NameKind]: number };
+
+/** Why AWS would reject this name, or undefined when it is valid. */
+export function invalidName(kind: NameKind, name: string): string | undefined {
+  const r: NameRule = NAME_RULES[kind];
+  if (name.length > r.max) return `${r.label} name ${name} is ${name.length} chars (${r.service} limit ${r.max}); skipped`;
+  if (r.min !== undefined && name.length < r.min) return `${r.label} name ${name} is shorter than ${r.min} chars (${r.service} minimum); skipped`;
+  if (!r.pattern.test(name)) return `${r.label} name ${name} has characters ${r.service} does not allow; skipped`;
+  return undefined;
+}
+
+/** Fit a name this tool generates into the kind's AWS length limit. */
+export function fitGeneratedName(kind: NameKind, name: string): string {
+  return fitName(name, NAME_RULES[kind].max);
+}
+
+/** NAME_RULES kind for a CloudFormation resource type whose name we validate. */
+export function nameKindForCfn(type: string): NameKind | undefined {
+  switch (type) {
+    case 'AWS::SQS::Queue': return 'sqs';
+    case 'AWS::SNS::Topic': return 'sns';
+    case 'AWS::S3::Bucket': return 's3';
+    case 'AWS::DynamoDB::Table': return 'dynamodb';
+    case 'AWS::SecretsManager::Secret': return 'secret';
+    case 'AWS::Logs::LogGroup': return 'logGroup';
+    default: return undefined;
+  }
+}

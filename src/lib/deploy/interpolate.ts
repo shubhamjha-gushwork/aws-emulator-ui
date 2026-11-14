@@ -58,7 +58,19 @@ export interface InterpCtx {
   circular: Set<string>;
   /** Nesting depth guard for re-interpolation. */
   depth: number;
+  /**
+   * Stages to retry, in order, when a stage-keyed lookup (a path containing a nested variable that
+   * evaluates to the current stage, e.g. ${self:custom.${sls:stage}.x}) has no value and no explicit default.
+   */
+  fallbackStages: string[];
+  /** 'serverless' follows Serverless Framework variable syntax; 'trinity' also allows bare document paths and ${x:-default}. */
+  dialect: Dialect;
 }
+
+export type Dialect = 'serverless' | 'trinity';
+
+/** Default for --fallback-stage. */
+export const DEFAULT_FALLBACK_STAGES = ['dev'];
 
 export function createCtx(opts: {
   stage: string;
@@ -68,6 +80,8 @@ export function createCtx(opts: {
   fileBase: string;
   env?: NodeJS.Dict<string>;
   fileEnv?: NodeJS.Dict<string>;
+  fallbackStages?: string[];
+  dialect?: Dialect;
 }): InterpCtx {
   return {
     stage: opts.stage,
@@ -85,6 +99,8 @@ export function createCtx(opts: {
     resolving: new Set(),
     circular: new Set(),
     depth: 0,
+    fallbackStages: [...new Set(opts.fallbackStages ?? DEFAULT_FALLBACK_STAGES)].filter((s) => s && s !== opts.stage),
+    dialect: opts.dialect ?? 'serverless',
   };
 }
 
@@ -198,70 +214,172 @@ function findExpressions(s: string): { start: number; end: number; body: string 
   return out;
 }
 
-function splitDefault(expr: string): { path: string; def?: string } {
-  // ${path, 'default'} or ${path, "default"} or ${path:-default} (seen in trinity files)
-  const dash = expr.match(/^([\s\S]+?):-(.*)$/);
-  if (dash && !dash[1].includes('${')) return { path: dash[1].trim(), def: dash[2] };
+interface Fallback {
+  raw: string;
+  /** Always a literal string (the right-hand side of ${x:-default}). */
+  literal?: boolean;
+}
+
+/**
+ * Split `path, fallback1, fallback2…` at top-level commas (Serverless Framework syntax). Trinity files
+ * may also use the shell-style `path:-default`.
+ */
+function splitFallbacks(expr: string, ctx: InterpCtx): { path: string; fallbacks: Fallback[] } {
+  const parts: string[] = [];
   let depth = 0;
   let inS = false;
   let inD = false;
+  let last = 0;
   for (let i = 0; i < expr.length; i++) {
     const c = expr[i];
     if (c === "'" && !inD) inS = !inS;
     else if (c === '"' && !inS) inD = !inD;
     else if (!inS && !inD) {
-      if (c === '{') depth++;
-      else if (c === '}') depth--;
+      if (c === '{' || c === '(') depth++;
+      else if (c === '}' || c === ')') depth--;
       else if (c === ',' && depth === 0) {
-        const def = unquote(expr.slice(i + 1).trim());
-        return { path: expr.slice(0, i).trim(), def };
+        parts.push(expr.slice(last, i).trim());
+        last = i + 1;
       }
     }
   }
-  return { path: expr.trim() };
+  parts.push(expr.slice(last).trim());
+  const [first, ...rest] = parts;
+  const fallbacks: Fallback[] = rest.map((raw) => ({ raw }));
+  if (ctx.dialect === 'trinity') {
+    const dash = first.match(/^([\s\S]+?):-([\s\S]*)$/);
+    if (dash && !dash[1].includes('${')) return { path: dash[1].trim(), fallbacks: [{ raw: dash[2], literal: true }, ...fallbacks] };
+  }
+  return { path: first, fallbacks };
 }
 
 function unquote(s: string): string {
-  if ((s.startsWith("'") && s.endsWith("'")) || (s.startsWith('"') && s.endsWith('"'))) return s.slice(1, -1);
+  if (s.length >= 2 && ((s.startsWith("'") && s.endsWith("'")) || (s.startsWith('"') && s.endsWith('"')))) return s.slice(1, -1);
   return s;
 }
 
+/** Variable sources Serverless resolves; a fallback naming one of these is a reference, not a literal. */
+const SOURCE_RE = /^(self|env|opt|sls|aws|ssm|cf|s3|param|construct|file|strToBool)\s*[:(]/;
+
 class CircularReference extends Error {}
+
+const STAGE_SLOT = Symbol('STAGE_SLOT');
+
+/**
+ * The lookup path with nested variables resolved, plus the same path for each fallback stage. A nested
+ * variable whose value is the current stage marks a stage-keyed lookup; those slots are swapped for the
+ * fallback stage.
+ */
+function candidatePaths(rawPath: string, ctx: InterpCtx): { path: string; stage?: string }[] {
+  const spans = findExpressions(rawPath);
+  if (!spans.length) return [{ path: rawPath.trim() }];
+  const pieces: (string | typeof STAGE_SLOT)[] = [];
+  let last = 0;
+  let stageKeyed = false;
+  for (const s of spans) {
+    pieces.push(rawPath.slice(last, s.start));
+    const v = interpolateString(rawPath.slice(s.start, s.end), ctx);
+    const str = v === undefined || v === null ? '' : stringify(v);
+    if (str === ctx.stage) {
+      pieces.push(STAGE_SLOT);
+      stageKeyed = true;
+    } else pieces.push(str);
+    last = s.end;
+  }
+  pieces.push(rawPath.slice(last));
+  const build = (stage: string) => {
+    const out = pieces.map((p) => (p === STAGE_SLOT ? stage : p)).join('').trim();
+    if (!out.includes('${')) return out;
+    const again = interpolateString(out, ctx);
+    return typeof again === 'string' ? again.trim() : out;
+  };
+  const out: { path: string; stage?: string }[] = [{ path: build(ctx.stage) }];
+  if (stageKeyed) for (const st of ctx.fallbackStages) out.push({ path: build(st), stage: st });
+  return out;
+}
+
+/** "custom.local is not defined for stage local; using custom.dev" — names only, deduped per stage block. */
+function noteStageFallback(primary: string, alt: string, stage: string, ctx: InterpCtx) {
+  const a = primary.split('.');
+  const b = alt.split('.');
+  let i = 0;
+  while (i < a.length - 1 && i < b.length - 1 && a[i] === b[i]) i++;
+  addWarning(ctx, `${a.slice(0, i + 1).join('.')} is not defined for stage ${ctx.stage}; using ${b.slice(0, i + 1).join('.')} (fallback stage ${stage}, see --fallback-stage)`);
+}
+
+/** Look one path up, resolving variables inside the value it points at (forward references). */
+function lookup(pathStr: string, ctx: InterpCtx): unknown {
+  let v = resolvePath(pathStr, ctx);
+  if (v instanceof SecretBag) v.referenced = true;
+  if (typeof v === 'string' && v.includes('${')) {
+    if (ctx.resolving.has(pathStr)) {
+      ctx.circular.add(pathStr);
+      throw new CircularReference(`circular reference via \${${pathStr}}`);
+    }
+    ctx.resolving.add(pathStr);
+    try {
+      v = interpolateString(v, ctx);
+    } finally {
+      ctx.resolving.delete(pathStr);
+    }
+  }
+  return v;
+}
+
+function unresolved(v: unknown): boolean {
+  return v === undefined || v === null || v === '' || v === MISSING_SECRET || v === PLACEHOLDER || v === PLACEHOLDER_VALUE;
+}
+
+/** Evaluate one fallback: quoted strings, numbers and booleans are literals; variable sources are resolved. */
+function evalFallback(f: Fallback, ctx: InterpCtx): unknown {
+  if (f.literal) return maybeInterp(f.raw, ctx);
+  const raw = f.raw.trim();
+  if ((raw.startsWith("'") && raw.endsWith("'")) || (raw.startsWith('"') && raw.endsWith('"'))) return maybeInterp(unquote(raw), ctx);
+  if (raw.includes('${')) return interpolateString(raw, ctx);
+  if (SOURCE_RE.test(raw) || (ctx.dialect === 'trinity' && isDocumentPath(raw, ctx))) return interpolateString(`\${${raw}}`, ctx);
+  return raw;
+}
+
+/** First fallback that resolves wins; the last one is used as-is (so `, ''` gives an empty string). */
+function resolveFallbacks(fallbacks: Fallback[], ctx: InterpCtx): unknown {
+  for (let i = 0; i < fallbacks.length; i++) {
+    const v = evalFallback(fallbacks[i], ctx);
+    if (i === fallbacks.length - 1 || !unresolved(v)) return v;
+  }
+  return undefined;
+}
 
 function resolveExpr(expr: string, ctx: InterpCtx): unknown {
   if (isCfnExpression(expr, ctx)) return `\${${expr}}`;
-  const { path: rawPath, def } = splitDefault(expr);
-  // Nested expressions inside the path (e.g. self:custom.x.${self:custom.stage})
-  const interpolatedPath = interpolateString(rawPath, ctx);
-  const pathStr = typeof interpolatedPath === 'string' ? interpolatedPath : rawPath;
-  if (ctx.circular.has(pathStr)) return def !== undefined ? maybeInterpDefault(def, ctx) : `\${${expr}}`;
+  const { path: rawPath, fallbacks } = splitFallbacks(expr, ctx);
+  const hasDefault = fallbacks.length > 0;
+  // Stage fallback only for lookups without an explicit default: a written default always wins.
+  const candidates = hasDefault ? candidatePaths(rawPath, ctx).slice(0, 1) : candidatePaths(rawPath, ctx);
+  let pathStr = candidates[0].path;
+  if (ctx.circular.has(pathStr)) return hasDefault ? resolveFallbacks(fallbacks, ctx) : `\${${expr}}`;
   try {
-    let v = resolvePath(pathStr, ctx);
-    if (v instanceof SecretBag) v.referenced = true;
-    // A referenced value may itself contain variables that have not been walked yet (forward reference).
-    if (typeof v === 'string' && v.includes('${')) {
-      if (ctx.resolving.has(pathStr)) {
-        ctx.circular.add(pathStr);
-        throw new CircularReference(`circular reference via \${${pathStr}}`);
-      }
-      ctx.resolving.add(pathStr);
-      try {
-        v = interpolateString(v, ctx);
-      } finally {
-        ctx.resolving.delete(pathStr);
+    let v: unknown;
+    for (const c of candidates) {
+      v = lookup(c.path, ctx);
+      if (v !== undefined) {
+        if (c.stage) noteStageFallback(candidates[0].path, c.path, c.stage, ctx);
+        pathStr = c.path;
+        break;
       }
     }
     // A missing secret key is unset: YAML defaults must win. Placeholders only when there is no default.
     if (v === MISSING_SECRET || v === PLACEHOLDER || v === PLACEHOLDER_VALUE) {
-      if (def !== undefined) {
+      if (hasDefault) {
+        const out = resolveFallbacks(fallbacks, ctx);
+        // The key counts as defaulted only when a fallback really supplied a value (an empty string is a value).
         const key = pathStr.split('.').pop();
-        if (key) ctx.defaultedKeys.add(key);
-        return maybeInterpDefault(def, ctx);
+        if (key && out !== undefined && out !== null && out !== PLACEHOLDER && out !== MISSING_SECRET && out !== PLACEHOLDER_VALUE) ctx.defaultedKeys.add(key);
+        return out === MISSING_SECRET ? PLACEHOLDER : out;
       }
       return PLACEHOLDER;
     }
     if (v === undefined || v === null || v === '') {
-      if (def !== undefined) return maybeInterpDefault(def, ctx);
+      if (hasDefault) return resolveFallbacks(fallbacks, ctx);
       const kind = kindOf(pathStr);
       if (kind === 'env') {
         addWarning(ctx, `\${env:${pathStr.slice(4)}} is unset; using a placeholder`);
@@ -277,9 +395,9 @@ function resolveExpr(expr: string, ctx: InterpCtx): unknown {
     }
     return v;
   } catch (e) {
-    if (def !== undefined && !(e instanceof CircularReference)) return maybeInterpDefault(def, ctx);
+    if (hasDefault && !(e instanceof CircularReference)) return resolveFallbacks(fallbacks, ctx);
     addWarning(ctx, `unresolved \${${expr}}: ${(e as Error).message}`);
-    if (e instanceof CircularReference && def !== undefined) return maybeInterpDefault(def, ctx);
+    if (e instanceof CircularReference && hasDefault) return resolveFallbacks(fallbacks, ctx);
     return `\${${expr}}`;
   }
 }
@@ -290,7 +408,7 @@ function isDocumentPath(p: string, ctx: InterpCtx): boolean {
   return Object.prototype.hasOwnProperty.call(ctx.root, p.split('.')[0]);
 }
 
-function maybeInterpDefault(def: string, ctx: InterpCtx): unknown {
+function maybeInterp(def: string, ctx: InterpCtx): unknown {
   return def.includes('${') ? interpolateString(def, ctx) : def;
 }
 
@@ -342,9 +460,10 @@ function resolvePath(p: string, ctx: InterpCtx): unknown {
 }
 
 function resolveSsm(spec: string, ctx: InterpCtx): SecretBag {
-  // /aws/reference/secretsmanager/NAME or NAME
-  const ref = spec.replace(/^\/aws\/reference\/secretsmanager\//, '');
-  const name = localSecretName(ctx.stage, ref);
+  // /aws/reference/secretsmanager/NAME-or-ARN, or a plain parameter path. Serverless v1's `~true` (decrypt) suffix is dropped.
+  const noDecrypt = spec.replace(/~(true|false|split)$/, '');
+  const ref = noDecrypt.replace(/^\/aws\/reference\/secretsmanager\//, '');
+  const name = localSecretName(ctx.stage, secretNameFromArn(ref) ?? ref);
   let bag = ctx.secrets.get(name);
   if (!bag) {
     bag = new SecretBag(name, spec, ctx.fileEnv);
@@ -455,19 +574,34 @@ export function promoteSecretsManagerRefs(value: unknown, ctx: InterpCtx): void 
   walk(value);
 }
 
+/**
+ * The secret name inside a Secrets Manager ARN, following AWS's documented format
+ * `arn:<partition>:secretsmanager:<region>:<account>:secret:<name>-<6 random characters>`.
+ * - A full ARN ends in `-` plus exactly 6 alphanumeric characters that Secrets Manager appended; they are dropped.
+ * - IAM-style wildcards for that suffix (`<name>-??????`, `<name>-*`, `<name>*`) are dropped too.
+ * - Anything after the resource id (ECS `valueFrom` `:json-key:version-stage:version-id`) is ignored.
+ * A partial ARN whose own name happens to end in `-` + 6 alphanumerics is ambiguous; AWS documents the
+ * same ambiguity and treats it as a full ARN, as we do. Returns undefined for anything that is not such an ARN.
+ */
+export function secretNameFromArn(raw: string): string | undefined {
+  const m = raw.trim().match(/^arn:aws[a-z-]*:secretsmanager:[^:]*:[^:]*:secret:([^:]+)/);
+  if (!m) return undefined;
+  const id = m[1];
+  if (/-\?{6}$/.test(id)) return id.slice(0, -7);
+  if (id.endsWith('*')) return id.replace(/-?\*$/, '');
+  if (/-[A-Za-z0-9]{6}$/.test(id)) return id.slice(0, -7);
+  return id;
+}
+
 function secretBagFromRefString(raw: string, ctx: InterpCtx): SecretBag | undefined {
   const s = raw.trim();
   if (!s || s.startsWith('${')) return undefined;
-  let leaf: string | undefined;
-  const arn = s.match(/^arn:aws:secretsmanager:[^:]+:[^:]+:secret:(.+)$/i);
-  // Full Secrets Manager ARNs end in -XXXXXX (6 random chars) that is not part of the secret name.
-  if (arn) leaf = arn[1].replace(/-[A-Za-z0-9]{6}$/, '');
-  else if (/\/aws\/reference\/secretsmanager\//i.test(s)) {
-    leaf = s.replace(/^.*\/aws\/reference\/secretsmanager\//i, '');
-  } else {
-    return undefined;
+  let leaf = secretNameFromArn(s);
+  if (leaf === undefined) {
+    if (!/\/aws\/reference\/secretsmanager\//i.test(s)) return undefined;
+    const ref = s.replace(/^.*\/aws\/reference\/secretsmanager\//i, '').replace(/~(true|false)$/, '');
+    leaf = secretNameFromArn(ref) ?? ref;
   }
-  leaf = leaf.replace(/-\*$/, '');
   const name = localSecretName(ctx.stage, leaf);
   let bag = ctx.secrets.get(name);
   if (!bag) {

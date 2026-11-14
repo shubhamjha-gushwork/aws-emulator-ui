@@ -3,7 +3,10 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { CreateRepositoryCommand, DescribeRepositoriesCommand, GetAuthorizationTokenCommand } from '@aws-sdk/client-ecr';
-import { CreateClusterCommand, RegisterTaskDefinitionCommand, CreateServiceCommand, UpdateServiceCommand, DescribeServicesCommand } from '@aws-sdk/client-ecs';
+import {
+  CreateClusterCommand, RegisterTaskDefinitionCommand, CreateServiceCommand, UpdateServiceCommand, DescribeServicesCommand,
+  type CreateServiceCommandInput, type UpdateServiceCommandInput,
+} from '@aws-sdk/client-ecs';
 import { CreateLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
 import {
   CreateLoadBalancerCommand, CreateTargetGroupCommand, CreateListenerCommand,
@@ -143,13 +146,12 @@ export async function applyTrinity(
         } else if (port) {
           plan.warnings.push(`${task.name}: no subnets found in ${region}; load balancer not created`);
         }
-        const existing = await clients.ecs.send(new DescribeServicesCommand({ cluster, services: [serviceName] })).catch(() => undefined);
-        // Floci's DescribeServices matches by name across clusters and regions, so check the cluster ARN too.
-        const present = existing?.services?.some((s) => sameServiceHome(s, serviceName, cluster, region));
-        if (present) {
-          await clients.ecs.send(new UpdateServiceCommand({ cluster, service: serviceName, taskDefinition: tdArn, desiredCount: desired, forceNewDeployment: true }));
-        } else {
-          await clients.ecs.send(new CreateServiceCommand({
+        await upsertService(clients, {
+          cluster,
+          region,
+          serviceName,
+          update: { cluster, service: serviceName, taskDefinition: tdArn, desiredCount: desired, forceNewDeployment: true },
+          create: {
             cluster,
             serviceName,
             taskDefinition: tdArn,
@@ -158,8 +160,8 @@ export async function applyTrinity(
             networkConfiguration: { awsvpcConfiguration: { subnets: net.subnets, assignPublicIp: 'ENABLED', securityGroups: net.sgs } },
             loadBalancers,
             tags: Object.entries(tags).map(([key, value]) => ({ key, value })),
-          }));
-        }
+          },
+        });
         resources.push({ kind: 'ecs-service', name: serviceName, extra: { cluster }, href: uiHref('ecs-service') });
       }
     }
@@ -327,8 +329,51 @@ async function upsertAlb(
   return { lbName, lbArn, tgName, tgArn: tgArn || '', dns, listenerArn };
 }
 
+/** Parse `arn:<partition>:ecs:<region>:<account>:cluster/<name>`. */
+export function parseClusterArn(arn: string): { region: string; cluster: string } | undefined {
+  const m = arn.match(/^arn:aws[a-z-]*:ecs:([^:]*):[^:]*:cluster\/(.+)$/);
+  return m ? { region: m[1], cluster: m[2] } : undefined;
+}
+
+/** A described service counts as present only when it is ACTIVE/DRAINING in the requested cluster and region. */
 export function sameServiceHome(s: { serviceName?: string; status?: string; clusterArn?: string }, name: string, cluster: string, region: string): boolean {
   if (s.serviceName !== name || s.status === 'INACTIVE') return false;
   if (!s.clusterArn) return true;
-  return s.clusterArn.endsWith(`:cluster/${cluster}`) && s.clusterArn.includes(`:${region}:`);
+  const home = parseClusterArn(s.clusterArn);
+  return !!home && home.cluster === cluster && home.region === region;
+}
+
+function errorText(e: unknown): string {
+  const err = e as { name?: string; message?: string };
+  return `${err?.name ?? ''} ${err?.message ?? ''}`;
+}
+/** ECS errors meaning "there is no such (active) service here". */
+export function isServiceMissing(e: unknown): boolean {
+  return /ServiceNotFound|ServiceNotActive|service not found|not active/i.test(errorText(e));
+}
+/** ECS errors meaning "a service with this name already exists here". */
+export function isServiceExisting(e: unknown): boolean {
+  return /already exists|idempoten/i.test(errorText(e));
+}
+
+/**
+ * Create-or-update an ECS service. DescribeServices decides the first attempt, but an emulator may answer
+ * it imprecisely (e.g. match a same-named service elsewhere), so the call that fails because the service is
+ * missing (or already exists) is retried as the other one once.
+ */
+export async function upsertService(
+  c: Pick<DeployClients, 'ecs'>,
+  p: { cluster: string; region: string; serviceName: string; update: UpdateServiceCommandInput; create: CreateServiceCommandInput },
+): Promise<'created' | 'updated'> {
+  const described = await c.ecs.send(new DescribeServicesCommand({ cluster: p.cluster, services: [p.serviceName] })).catch(() => undefined);
+  const present = described?.services?.some((s) => sameServiceHome(s, p.serviceName, p.cluster, p.region)) ?? false;
+  const update = async () => { await c.ecs.send(new UpdateServiceCommand(p.update)); return 'updated' as const; };
+  const create = async () => { await c.ecs.send(new CreateServiceCommand(p.create)); return 'created' as const; };
+  try {
+    return present ? await update() : await create();
+  } catch (e) {
+    if (present && isServiceMissing(e)) return create();
+    if (!present && isServiceExisting(e)) return update();
+    throw e;
+  }
 }

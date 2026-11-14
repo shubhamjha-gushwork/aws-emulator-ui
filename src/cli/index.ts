@@ -20,6 +20,10 @@ Usage:
 
 Options:
   --stage <name>         Stage (default: local)
+  --fallback-stage <s[,s…]|none>
+                         Stages tried, in order, when a stage-keyed lookup such as
+                         \${self:custom.\${sls:stage}.x} or \${custom.\${custom.stage}.cpu}
+                         has no value for --stage and no default (default: dev)
   --region <region>      Region (default: us-east-1, or the UI setting)
   --endpoint <url>       Floci endpoint (default: http://127.0.0.1:4566)
   --dry-run              Print the plan; do not create anything
@@ -52,7 +56,7 @@ async function defaults(): Promise<Pick<DeployOptions, 'endpoint' | 'region' | '
   return { endpoint, region, stage: 'local' };
 }
 
-const VALUE_FLAGS = new Set(['stage', 'region', 'endpoint', 'desired-count', 'kind', 'env-file']);
+const VALUE_FLAGS = new Set(['stage', 'region', 'endpoint', 'desired-count', 'kind', 'env-file', 'fallback-stage']);
 
 function fail(msg: string): never {
   console.error(`✗ ${msg}`);
@@ -87,8 +91,15 @@ function parseArgs(argv: string[]) {
   if (opts.kind !== undefined && opts.kind !== 'serverless' && opts.kind !== 'trinity') fail(`--kind must be serverless or trinity (got ${opts.kind})`);
   if (opts['desired-count'] !== undefined && !/^\d+$/.test(String(opts['desired-count']))) fail(`--desired-count must be a whole number (got ${opts['desired-count']})`);
   if (opts.stage !== undefined && !/^[A-Za-z0-9-]+$/.test(String(opts.stage))) fail(`--stage may only contain letters, digits and hyphens (got ${opts.stage})`);
+  if (opts['fallback-stage'] !== undefined && String(opts['fallback-stage']) !== 'none' && !/^[A-Za-z0-9-]+(,[A-Za-z0-9-]+)*$/.test(String(opts['fallback-stage']))) fail(`--fallback-stage must be a stage, a comma-separated list of stages, or none (got ${opts['fallback-stage']})`);
   if (opts.region !== undefined && !/^[a-z]{2}(-[a-z]+)+-\d$/.test(String(opts.region))) fail(`--region does not look like an AWS region (got ${opts.region})`);
   return { cmd, positional, opts };
+}
+
+function fallbackStages(v: string | boolean | undefined): string[] | undefined {
+  if (typeof v !== 'string') return undefined;
+  if (v === 'none') return [];
+  return v.split(',').filter(Boolean);
 }
 
 function printPlan(plan: Plan) {
@@ -133,6 +144,7 @@ async function main() {
     desiredCount: opts['desired-count'] ? Number(opts['desired-count']) : undefined,
     kind: opts.kind === 'serverless' || opts.kind === 'trinity' ? opts.kind : undefined,
     envFile: typeof opts['env-file'] === 'string' ? String(opts['env-file']) : undefined,
+    fallbackStages: fallbackStages(opts['fallback-stage']),
   });
 
   if (cmd === 'list') {

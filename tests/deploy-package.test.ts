@@ -15,23 +15,28 @@ describe('package.patterns', () => {
     expect(globMatch('utils/a/b.py', 'utils/*')).toBe(false);
   });
 
-  it('keeps only include patterns and drops bangs', () => {
-    const patterns = [
-      'handlers/**',
-      'services/**',
-      'utils/**',
-      '!.git/**',
-      '!tests/**',
-      '!node_modules/**',
-      '!requirements.txt',
-    ];
+  it('follows Serverless semantics: files start included, the last matching pattern decides', () => {
+    const patterns = ['handlers/**', '!tests/**', '!requirements.txt'];
     expect(matchesPackagePatterns('handlers/binding/create.py', patterns)).toBe(true);
-    expect(matchesPackagePatterns('services/x.py', patterns)).toBe(true);
-    expect(matchesPackagePatterns('utils/y.py', patterns)).toBe(true);
     expect(matchesPackagePatterns('tests/test_x.py', patterns)).toBe(false);
     expect(matchesPackagePatterns('requirements.txt', patterns)).toBe(false);
-    expect(matchesPackagePatterns('vendored/huge.bin', patterns)).toBe(false);
-    expect(matchesPackagePatterns('cf-workers/src.js', patterns)).toBe(false);
+    // Not matched by any pattern: still included, as with `serverless package`.
+    expect(matchesPackagePatterns('vendored/huge.bin', patterns)).toBe(true);
+    // Start with '!**' to pack only what is listed.
+    const only = ['!**', ...patterns];
+    expect(matchesPackagePatterns('handlers/a.py', only)).toBe(true);
+    expect(matchesPackagePatterns('vendored/huge.bin', only)).toBe(false);
+    expect(matchesPackagePatterns('other/src.js', only)).toBe(false);
+  });
+
+  it('maps legacy exclude / include like Serverless: include re-adds what exclude removed', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pkg-legacy-'));
+    fs.mkdirSync(path.join(root, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'lib', 'keep.py'), '#');
+    fs.writeFileSync(path.join(root, 'lib', 'drop.py'), '#');
+    fs.writeFileSync(path.join(root, 'app.py'), '#');
+    expect(selectPackageFiles(root, { exclude: ['lib/**'], include: ['lib/keep.py'] }).sort()).toEqual(['app.py', 'lib/keep.py']);
+    fs.rmSync(root, { recursive: true, force: true });
   });
 
   it('with only excludes, packs everything else', () => {
@@ -56,7 +61,7 @@ describe('package.patterns', () => {
     fs.writeFileSync(path.join(root, 'requirements.txt'), 'foo');
 
     const files = selectPackageFiles(root, {
-      patterns: ['handlers/**', 'services/**', 'utils/**', '!tests/**', '!node_modules/**', '!requirements.txt'],
+      patterns: ['!**', 'handlers/**', 'services/**', 'utils/**', '!tests/**', '!node_modules/**', '!requirements.txt'],
     }).sort();
     expect(files).toEqual(['handlers/binding/create.py', 'services/x.py', 'utils/y.py']);
     fs.rmSync(root, { recursive: true, force: true });

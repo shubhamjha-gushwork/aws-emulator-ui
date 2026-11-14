@@ -70,9 +70,9 @@ describe('fill secrets from env keys', () => {
 
   it('classifies env-file hits, YAML-defaulted keys, and truly missing keys by name only', () => {
     const hidden = 'hidden-token';
-    const result = classifyKeys(['API_TOKEN', 'POSTHOG_HOST', 'REDIS_URL'], { API_TOKEN: hidden }, ['POSTHOG_HOST']);
+    const result = classifyKeys(['API_TOKEN', 'ANALYTICS_HOST', 'REDIS_URL'], { API_TOKEN: hidden }, ['ANALYTICS_HOST']);
     expect(result.filled).toEqual(['API_TOKEN']);
-    expect(result.defaulted).toEqual(['POSTHOG_HOST']);
+    expect(result.defaulted).toEqual(['ANALYTICS_HOST']);
     expect(result.missing).toEqual(['REDIS_URL']);
     expect(JSON.stringify(result)).not.toContain(hidden);
   });

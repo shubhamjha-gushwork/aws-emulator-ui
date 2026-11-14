@@ -26,7 +26,7 @@ import { upsertPlaceholderSecret } from '../secrets';
 import { collectSecrets, resolveConstructTokens } from '../interpolate';
 import { classifyKeys, fillPlaceholderEnv, type EnvMap } from '../envfile';
 import { triggerEnabled, triggerState } from '../run-mode';
-import { decodeIntrinsic, LIMITS, orderByDependencies, referencedIds, resolveIntrinsic, type LogicalMap, type PseudoParams } from '../cfn';
+import { decodeIntrinsic, invalidName, nameKindForCfn, orderByDependencies, referencedIds, resolveIntrinsic, type LogicalMap, type PseudoParams } from '../cfn';
 import { packageFunction } from './package';
 import type { ParsedServerless, SlsFunction } from './parse';
 import {
@@ -98,7 +98,7 @@ export async function applyServerless(
     const dlq = await upsertQueue(clients, dlqName, q.fifo);
     await clients.sqs.send(new SetQueueAttributesCommand({
       QueueUrl: queue.url,
-      Attributes: { RedrivePolicy: JSON.stringify({ deadLetterTargetArn: dlq.arn, maxReceiveCount: 5 }) },
+      Attributes: { RedrivePolicy: JSON.stringify({ deadLetterTargetArn: dlq.arn, maxReceiveCount: q.maxRetries }) },
     })).catch(() => undefined);
     logical[q.name] = queue;
     parsed.ctx.constructs[q.name] = { queueUrl: queue.url, queueArn: queue.arn, dlqArn: dlq.arn, dlqUrl: dlq.url };
@@ -287,7 +287,7 @@ export async function applyServerless(
 
   // 6. Step Functions
   for (const sm of parsed.stepFunctions) {
-    if (sm.name.length > LIMITS.sfn) continue; // reported by the plan
+    if (invalidName('sfn', sm.name)) continue; // reported by the plan
     try {
       const def = rewriteSfn(sm.definition, fnArns, logical);
       const arn = await upsertSfn(clients, sm.name, def);
@@ -374,17 +374,18 @@ async function upsertCfn(
     name = r.Type === 'AWS::S3::Bucket' ? logicalId.toLowerCase() : logicalId;
     warn(`${logicalId}: could not resolve its name locally; using ${name}`);
   }
+  const nameKind = nameKindForCfn(r.Type);
+  const badName = nameKind ? invalidName(nameKind, name) : undefined;
+  if (badName) {
+    warn(badName);
+    return undefined;
+  }
   const val = (v: unknown) => {
     const out = resolveIntrinsic(v, logical, pseudo);
     return typeof out === 'string' ? out : out === undefined ? undefined : JSON.stringify(out);
   };
   switch (r.Type) {
     case 'AWS::SQS::Queue': {
-      const bad = invalidQueueName(name);
-      if (bad) {
-        warn(bad);
-        return undefined;
-      }
       const fifo = name.endsWith('.fifo') || p.FifoQueue === true || p.FifoQueue === 'true';
       const attrs: Record<string, string> = {};
       for (const k of QUEUE_ATTRS) {

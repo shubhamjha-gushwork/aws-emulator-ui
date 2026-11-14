@@ -119,7 +119,7 @@ npm unlink -g aws-emulator                 # remove the global command
 
 Paths, `.env` lookup and `--env-file` are resolved from the folder you run it in; the endpoint and region come from the UI settings (default `http://127.0.0.1:4566`, `us-east-1`).
 
-Options: `--stage` (default `local`), `--region` (default `us-east-1` or the UI setting), `--endpoint`, `--dry-run`, `--no-build` (skip Docker build/push for Trinity), `--no-run` (create only: EventBridge/Scheduler rules are DISABLED, SQS/stream mappings are disabled, S3 notifications are skipped, ECS `desiredCount` is 0), `--desired-count N`, `--kind serverless|trinity`, `--env-file <path>`. `--key=value` also works. Unknown options, a missing value, a bad `--kind`, `--stage`, `--region` or `--desired-count` exit with code 2 before anything is created.
+Options: `--stage` (default `local`), `--region` (default `us-east-1` or the UI setting), `--endpoint`, `--dry-run`, `--no-build` (skip Docker build/push for Trinity), `--no-run` (create only: EventBridge/Scheduler rules are DISABLED, SQS/stream mappings are disabled, S3 notifications are skipped, ECS `desiredCount` is 0), `--desired-count N`, `--kind serverless|trinity`, `--env-file <path>`, `--fallback-stage <stage[,stage…]|none>` (see [Stage fallback](#stage-fallback)). `--key=value` also works. Unknown options, a missing value, a bad `--kind`, `--stage`, `--region` or `--desired-count` exit with code 2 before anything is created.
 
 **Region:** `--region` wins over `provider.region` / Trinity `region`, which wins over the UI setting. The region is part of the deployment record, so the same service can be deployed to two regions (or two stages) side by side; ids outside `us-east-1` get a `-<region>` suffix.
 
@@ -143,7 +143,11 @@ npx aws-emulator secrets ./path/to/service
 npx aws-emulator secrets ./path/to/service --env-file ./path/to/.env --write-example
 ```
 
-`--env-file` (default: `.env.local` then `.env` in the target repo) is parsed as `KEY=VALUE`. Keys are matched by name to the SSM / Secrets Manager keys the YAML references. For a JSON secret such as `appSecrets`, the CLI builds the JSON object from the matching keys and leaves any others as the placeholder string. Matching keys also replace `PLACEHOLDER` values in Lambda and ECS task environment variables. Trinity `environment.refs` that are Secrets Manager ARNs are treated the same way as `${ssm:…}`.
+`--env-file` (default: `.env.local` then `.env` in the target repo) is parsed as `KEY=VALUE`. Keys are matched by name to the SSM / Secrets Manager keys the YAML references. For a JSON secret such as `appSecrets`, the CLI builds the JSON object from the matching keys and leaves any others as the placeholder string. Matching keys also replace `PLACEHOLDER` values in Lambda and ECS task environment variables. Trinity `environment.refs` that are Secrets Manager ARNs are treated the same way as `${ssm:…}`. The local secret name follows AWS's ARN format: a full ARN's `-` + 6 random characters suffix is dropped, as are IAM-style `-??????` / `-*` wildcards and any ECS `valueFrom` `:json-key:…` tail; a partial ARN (no suffix) is used as is.
+
+### Stage fallback
+
+A *stage-keyed lookup* is a variable whose path contains another variable that evaluates to the current stage, for example `${self:custom.settings.${sls:stage}.level}`, `${custom.${custom.stage}.cpu}` or `${environment.refs.creds${custom.stage}.KEY}`. When such a lookup has no value for `--stage` and no explicit default, the same lookup is retried with each `--fallback-stage`, in order (default `dev`), so `--stage local` picks up the `dev` settings of a file that only defines `dev` and `prod`. The rule is the same for serverless.yml and trinity.yml and for every stage-keyed lookup (custom blocks, refs, secrets). It never overrides a default written in the YAML (`${…, 'x'}`), and the plan prints one warning per fallback used. Pass `--fallback-stage dev,prod` to also try `prod`, or `--fallback-stage none` to turn it off.
 
 `aws-emulator secrets` prints each secret and whether each key is `present` or `missing` in the env file. `--write-example [path]` writes a key-names-only template (`KEY=`, no values). Do not commit real `.env` files; this repo gitignores `.env*`.
 
@@ -154,16 +158,18 @@ A directory is scanned for `serverless.yml` / `serverless.yaml`, `trinity.yml` /
 
 **Serverless Framework (v3/v4 YAML):**
 
-- `${opt:stage}`, `${opt:region}`, `${self:…}`, `${env:…}` (with defaults), `${file(…)}`, `${aws:accountId}`, `${aws:region}`, and nested `${self:custom.${self:custom.stage}.…}`.
+- `${opt:stage}`, `${opt:region}`, `${self:…}`, `${env:…}`, `${file(…)}`, `${aws:accountId}`, `${aws:region}`, `${sls:stage}`, and nested `${self:custom.${self:custom.stage}.…}`. `--stage` is the service stage (like `serverless deploy --stage`); `custom.stage` is just a value. Other `${opt:name}` values are read from `SLS_OPT_name` in the environment.
+- Fallbacks follow Serverless syntax: `${a, b, 'c'}` tries each in order. Quoted strings, numbers and booleans are literals; `self:` / `env:` / `opt:` / `sls:` / `ssm:` / `file(…)` and nested `${…}` are resolved. Stage-keyed lookups without a default use the [stage fallback](#stage-fallback).
 - `${ssm:…}` and `${ssm(region):/aws/reference/secretsmanager/…}` are **not** fetched from AWS. The CLI creates a placeholder secret in Floci Secrets Manager (`aws-emulator/<stage>/…`) and prints the keys it saw so you can fill them in.
-- Functions (nodejs and python handlers). Node functions are bundled with esbuild when the project (or this repo) has it. Python is zipped from source; `serverless-python-requirements` / `serverless-uv-requirements` are not run, so third-party packages may be missing.
-- HTTP events → API Gateway REST; `httpApi` events → HTTP API. Authorizers, custom domains and `serverless-domain-manager` are skipped.
+- Functions (nodejs and python handlers). Node functions are bundled with esbuild when the project (or this repo) has it. Python is zipped from source; dependency-packaging plugins are not run, so third-party packages may be missing.
+- Plugins: `serverless-lift` (queue constructs), `serverless-step-functions` and `serverless-esbuild` are translated; every other plugin in `plugins` (list or `{ modules }` form) is listed as not run.
+- HTTP events → API Gateway REST; `httpApi` events → HTTP API. Authorizers and custom domains are skipped.
 - `schedule` → EventBridge rules (one per event, `rate` lists, `input`, `enabled: false`); `sqs` → event source mappings; `s3` → bucket notifications; `sns` → topic + Lambda subscription; `eventBridge` → rules + targets, creating a custom `eventBus` if it is missing.
 - CloudFormation intrinsics in `resources` and in env vars: `Ref`, `Fn::GetAtt`, `Fn::Join`, `Fn::Sub`, `Fn::Select`, `Fn::Split`, plus pseudo parameters. Resources are created in dependency order, so a queue's `RedrivePolicy` can point at its DLQ.
-- `${sls:stage}`, forward references and `package.patterns` (service and function level, last match wins). Circular `${self:}` references and missing values without a default are reported as warnings instead of crashing.
-- Names over the AWS limit (Lambda 64, SQS 80) are reported and skipped; generated rule / ALB / target group names are shortened with a hash.
+- Forward references and `package.patterns` (service and function level) with Serverless semantics: every file starts included and the last matching pattern decides, so start with `'!**'` to pack only what you list. Legacy `package.exclude` / `include` apply excludes first, then includes. Circular `${self:}` references and missing values without a default are reported as warnings instead of crashing.
+- Names are checked against each service's AWS naming rules (length and characters: Lambda 64, SQS 80, SNS 256, EventBridge rules 64, Step Functions 80, DynamoDB 3–255, S3 3–63 lowercase, log groups 512, secrets 512, ECS 255, ECR 256, ALB / target groups 32). Names written in the YAML that break them are reported and skipped; names the CLI generates (rules, DLQs, ALBs, target groups, task families, ECR repos) are shortened with a hash.
 - `resources.Resources` of type SQS, SNS, S3, DynamoDB, Secrets Manager, log groups. IAM, CloudWatch Alarms, metric filters, Bedrock AgentCore and other types are reported and skipped.
-- `serverless-lift` `queue` constructs → SQS (+ DLQ) and a worker Lambda. Other construct types and alarms are skipped.
+- `serverless-lift` `queue` constructs → SQS (+ DLQ) and a worker Lambda, named as Lift does: `<service>-<stage>-<id>`, `<service>-<stage>-<id>-dlq` and `<service>-<stage>-<id>Worker`, with `maxRetries` (default 3) as the DLQ receive count. Other construct types and alarms are skipped.
 - `serverless-step-functions` state machines (definition inlined or via `${file(…)}`).
 
 **Trinity (observed schema; there is no formal public spec in the checked-out trees):**
@@ -172,18 +178,18 @@ A directory is scanned for `serverless.yml` / `serverless.yaml`, `trinity.yml` /
 - `stacks.HTTPApi`: ECR repo, `docker build` + `docker push` to Floci ECR (see `--no-build`), ECS cluster, task definition (image, ports, env, awslogs), service (`desiredCount`), ALB + target group + listener when `appPort` is set.
 - `stacks.Fargate`: the same without a load balancer, unless a port is set.
 - `stacks.ScheduledFargate`: cluster, task definition, EventBridge schedule. If there is no Dockerfile, a slim Python image is generated from the task `handler`.
-- `${custom.stage}` and `${custom.${custom.stage}.…}` with a fallback to `custom.dev` when `custom.<stage>` is missing (so `--stage local` still picks up a `dev` block), or to the only stage block when there is no `dev` one. The plan prints a warning when a fallback is used.
-- `${environment.refs…}` becomes placeholder secrets, same as SSM above. Stage-keyed refs such as `secretsdev` / `appSecrets-prod` used as `${environment.refs.secrets${custom.stage}.KEY}` fall back the same way. Refs that no variable reads for the chosen stage are not created, and unresolved paths are reported instead of being dropped.
+- `${custom.stage}` (always the `--stage` value) and `${custom.${custom.stage}.…}`, with the [stage fallback](#stage-fallback) when `custom.<stage>` is missing. Bare document paths and the shell-style `${path:-default}` are accepted in trinity files.
+- `${environment.refs…}` becomes placeholder secrets, same as SSM above. Stage-keyed refs used as `${environment.refs.creds${custom.stage}.KEY}` use the same stage fallback. Refs that no variable reads for the chosen stage are not created, and unresolved paths are reported instead of being dropped.
 - `buildArgs` / `dockerBuildArgs` (map or `KEY=VALUE` list) are passed to `docker build`. A missing Dockerfile is reported before anything is created; stacks of unknown types without a Dockerfile are skipped.
 - Custom domains, ACM, Route 53, autoscaling and IAM statements are not created. Multi-region stacks deploy only the requested region.
 
 ### What is not supported / known limits
 
-- We evaluated running the official `serverless deploy` against Floci. CloudFormation itself works there (a simple stack creates resources), but a real `serverless deploy` also resolves `${ssm:}` (which must never hit real AWS), and plugins such as domain-manager, global-authorizer, lift custom resources and Python packaging are not reliable against Floci. The CLI therefore **translates** the YAML and talks to service APIs directly.
+- We evaluated running the official `serverless deploy` against Floci. CloudFormation itself works there (a simple stack creates resources), but a real `serverless deploy` also resolves `${ssm:}` (which must never hit real AWS), and plugins such as custom-domain and authorizer plugins, lift custom resources and Python packaging are not reliable against Floci. The CLI therefore **translates** the YAML and talks to service APIs directly.
 - Container-image Lambdas (`provider.ecr` / `image:`) are not packaged.
-- `serverless-offline`, tracing, and prune plugins are ignored.
+- Plugins other than the three above are not run (see Plugins).
 - Placeholder secrets contain the literal value `PLACEHOLDER — set this value in Floci Secrets Manager` unless a local `--env-file` (or `.env.local` / `.env`) provides the same key names. Values from that file are written only to Floci Secrets Manager and to the function/task environment; they are never printed and never read from real AWS.
-- Idempotent re-deploy updates existing functions, queues, services and so on rather than failing. `destroy` removes what that deploy recorded (by id, tagged where the API accepts tags), except resources another recorded deploy in the same region also uses (for example one secret shared by several repos); those are kept and listed.
+- Idempotent re-deploy updates existing functions, queues, services and so on rather than failing. An ECS service is updated when DescribeServices finds it in the same cluster and region (by cluster ARN); if that update reports the service missing, or a create reports it already exists, the other call is retried once. `destroy` removes what that deploy recorded (by id, tagged where the API accepts tags), except resources another recorded deploy in the same region also uses (for example one secret shared by several repos); those are kept and listed.
 - Placeholder secrets are merged, not overwritten: keys used by other configs and values you filled in by hand stay; the env file wins for its keys.
 - An SQS trigger whose source is not an ARN or a queue in the same stack (for example a queue ARN kept in a secret) is reported in the plan and skipped.
 - API routes removed from the YAML stay on the REST / HTTP API after a redeploy (the API itself is pruned when it is no longer used).

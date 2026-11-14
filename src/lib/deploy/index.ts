@@ -57,7 +57,7 @@ async function run(opts: DeployOptions, dry: boolean): Promise<RunResult> {
   const env = { ...process.env, ...loaded.env };
   const plans: Plan[] = [];
   const manifests: DeployManifest[] = [];
-  const parseOpts = { stage: opts.stage, region: opts.region, env, fileEnv: loaded.env, regionFromFlag: opts.regionFromFlag };
+  const parseOpts = { stage: opts.stage, region: opts.region, env, fileEnv: loaded.env, regionFromFlag: opts.regionFromFlag, fallbackStages: opts.fallbackStages };
   for (const cfg of configs) {
     const sourceLabel = path.resolve(cfg.file);
     if (cfg.kind === 'serverless') {
@@ -205,10 +205,10 @@ function runSyncPlan(opts: DeployOptions): RunResult {
   const plans: Plan[] = [];
   for (const cfg of configs) {
     if (cfg.kind === 'serverless') {
-      const parsed = parseServerlessFile(cfg.file, { stage: opts.stage, region: opts.region, env, fileEnv: loaded.env, regionFromFlag: opts.regionFromFlag });
+      const parsed = parseServerlessFile(cfg.file, { stage: opts.stage, region: opts.region, env, fileEnv: loaded.env, regionFromFlag: opts.regionFromFlag, fallbackStages: opts.fallbackStages });
       plans.push(annotatePlan(planServerless(parsed, { noRun: opts.noRun }), loaded.env));
     } else {
-      const parsed = parseTrinityFile(cfg.file, { stage: opts.stage, region: opts.region, env, fileEnv: loaded.env, regionFromFlag: opts.regionFromFlag });
+      const parsed = parseTrinityFile(cfg.file, { stage: opts.stage, region: opts.region, env, fileEnv: loaded.env, regionFromFlag: opts.regionFromFlag, fallbackStages: opts.fallbackStages });
       plans.push(annotatePlan(planTrinity(parsed, { noRun: opts.noRun, desiredCount: opts.desiredCount }), loaded.env));
     }
   }

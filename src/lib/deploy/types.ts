@@ -39,6 +39,11 @@ export interface DeployOptions {
   noRun?: boolean;
   /** --region was passed explicitly: it overrides provider.region / the trinity file's region. */
   regionFromFlag?: boolean;
+  /**
+   * --fallback-stage: stages tried, in order, when a stage-keyed lookup (e.g. ${self:custom.${sls:stage}.x},
+   * ${custom.${custom.stage}.cpu}) has no value for --stage and no explicit default. Default ['dev']; [] disables it.
+   */
+  fallbackStages?: string[];
 }
 
 export interface PlannedResource {

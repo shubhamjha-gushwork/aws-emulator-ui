@@ -4,7 +4,7 @@ import { collectSecrets, createCtx, interpolateTree, promoteSecretsManagerRefs, 
 import { loadYaml } from '../yaml';
 import { type Plan, type PlannedResource, type ResourceKind, uiHref } from '../types';
 import { noRunDetail, serviceDesiredCount } from '../run-mode';
-import { fitName, LIMITS } from '../cfn';
+import { fitGeneratedName } from '../cfn';
 import { fitFargateResources } from './fargate';
 
 export type TrinityStackKind = 'HTTPApi' | 'Fargate' | 'ScheduledFargate' | string;
@@ -74,37 +74,35 @@ function strEnv(v: unknown): Record<string, string> {
  * shapes observed in trinity.yml / *.trinity.yml files:
  *   name, account, region, environment.{refs,variables}, custom.{stage}, stacks.{HTTPApi|Fargate|ScheduledFargate}
  */
-export function parseTrinityFile(file: string, opts: { stage: string; region: string; accountId?: string; env?: NodeJS.Dict<string>; fileEnv?: NodeJS.Dict<string>; regionFromFlag?: boolean }): ParsedTrinity {
+export interface ParseOptions {
+  stage: string;
+  region: string;
+  accountId?: string;
+  env?: NodeJS.Dict<string>;
+  fileEnv?: NodeJS.Dict<string>;
+  regionFromFlag?: boolean;
+  /** --fallback-stage: stages tried, in order, when a stage-keyed lookup has no value (default: dev). */
+  fallbackStages?: string[];
+}
+
+export function parseTrinityFile(file: string, opts: ParseOptions): ParsedTrinity {
   const raw = fs.readFileSync(file, 'utf8');
   const doc = rec(loadYaml(raw, file));
   const root = path.dirname(file);
-  // Inject custom.stage and fall back to custom.dev when custom.<stage> is missing.
+  // custom.stage is the stage being deployed. Stage-keyed lookups such as ${custom.${custom.stage}.cpu} or
+  // ${environment.refs.secrets${custom.stage}.KEY} fall back to --fallback-stage in the variable resolver.
   const custom = rec(doc.custom);
-  const stageBlocks = Object.keys(custom).filter((k) => k !== 'stage' && k !== opts.stage && custom[k] && typeof custom[k] === 'object');
-  const refFallbacks: string[] = [];
-  if (custom[opts.stage] === undefined && custom.dev !== undefined) {
-    custom[opts.stage] = custom.dev;
-  } else if (custom[opts.stage] === undefined) {
-    // No dev block: use the only stage block there is (e.g. a prod-only file), and say so.
-    const only = stageBlocks.filter((k) => COMMON_STAGES.includes(k));
-    if (only.length === 1) {
-      custom[opts.stage] = custom[only[0]];
-      refFallbacks.push(`custom.${opts.stage} is not defined; using custom.${only[0]} for stage ${opts.stage}`);
-    }
-  }
   custom.stage = opts.stage;
   doc.custom = custom;
-  const env0 = rec(doc.environment);
-  refFallbacks.push(...aliasStageRefs(rec(env0.refs), opts.stage, stageBlocks));
 
-  const ctx = createCtx({ stage: opts.stage, region: opts.region, accountId: opts.accountId, root: doc, fileBase: root, env: opts.env, fileEnv: opts.fileEnv });
+  const ctx = createCtx({ stage: opts.stage, region: opts.region, accountId: opts.accountId, root: doc, fileBase: root, env: opts.env, fileEnv: opts.fileEnv, fallbackStages: opts.fallbackStages, dialect: 'trinity' });
   if (doc.custom) interpolateTree(doc.custom, ctx);
   const refs = rec(rec(doc.environment).refs);
   interpolateTree(refs, ctx);
   promoteSecretsManagerRefs(refs, ctx);
   interpolateTree(doc, ctx);
 
-  const warnings = [...refFallbacks, ...ctx.warnings];
+  const warnings = [...ctx.warnings];
   for (const name of unreferencedSecrets(ctx)) warnings.push(`secret ${name} is not referenced by any variable for stage ${opts.stage}; not created`);
   const unsupported: string[] = [];
   const name = str(doc.name) || path.basename(root);
@@ -138,35 +136,6 @@ export function parseTrinityFile(file: string, opts: { stage: string; region: st
   }
 
   return { name, file, root, stage: opts.stage, region, environment: envVars, stacks, ctx, warnings, unsupported };
-}
-
-const COMMON_STAGES = ['dev', 'prod', 'production', 'staging', 'stage', 'test', 'qa', 'uat'];
-
-/**
- * environment.refs keyed by stage (`secretsdev`, `appSecrets-prod`) referenced as
- * `${environment.refs.secrets${custom.stage}.KEY}`: when the requested stage has no ref, reuse the dev
- * one (like custom.<stage> → custom.dev), or the only one there is. Without this every such env var
- * silently disappeared. Mutates refs; returns warnings (names only).
- */
-export function aliasStageRefs(refs: Record<string, unknown>, stage: string, stageBlocks: string[]): string[] {
-  const suffixes = [...new Set([...stageBlocks, ...COMMON_STAGES])].filter((s) => s && s !== stage).sort((a, b) => b.length - a.length);
-  const groups = new Map<string, { key: string; suffix: string }[]>();
-  for (const key of Object.keys(refs)) {
-    const suffix = suffixes.find((s) => key.length > s.length && key.endsWith(s));
-    if (!suffix) continue;
-    const prefix = key.slice(0, -suffix.length);
-    groups.set(prefix, [...(groups.get(prefix) ?? []), { key, suffix }]);
-  }
-  const warnings: string[] = [];
-  for (const [prefix, list] of groups) {
-    const target = `${prefix}${stage}`;
-    if (refs[target] !== undefined) continue;
-    const pick = list.find((c) => c.suffix === 'dev') ?? (list.length === 1 ? list[0] : undefined);
-    if (!pick) continue;
-    refs[target] = refs[pick.key];
-    warnings.push(`environment.refs.${target} is not defined; using environment.refs.${pick.key} for stage ${stage}`);
-  }
-  return warnings;
 }
 
 function arr(v: unknown): string[] | undefined {
@@ -220,17 +189,19 @@ function slugName(s: string): string {
 
 /** Physical names apply creates for a task; shared with the plan so both always agree. */
 export function trinityNames(parsedName: string, stage: string, t: TrinityTask) {
-  const family = `${t.name}-${stage}`;
+  // Generated names are fitted to each service's AWS limit (NAME_RULES); names written in the file are kept.
+  const family = fitGeneratedName('taskFamily', `${t.name}-${stage}`);
   const base = slugName(`${t.name}-${stage}`);
+  const alb = fitGeneratedName('alb', base);
   return {
-    cluster: t.clusterName || `${parsedName}-${stage}`,
-    repo: `aws-emulator/${stage}/${t.name}`.toLowerCase(),
+    cluster: t.clusterName || fitGeneratedName('ecsCluster', `${parsedName}-${stage}`),
+    repo: fitGeneratedName('ecr', `aws-emulator/${stage}/${t.name}`.toLowerCase()),
     family,
     logGroup: `/ecs/${family}`,
-    rule: fitName(`${family}-schedule`, LIMITS.rule),
-    alb: fitName(base, LIMITS.alb),
-    targetGroup: fitName(slugName(`${base}-tg`), LIMITS.targetGroup),
-    listener: `${fitName(base, LIMITS.alb)}:80`,
+    rule: fitGeneratedName('rule', `${family}-schedule`),
+    alb,
+    targetGroup: fitGeneratedName('targetGroup', slugName(`${base}-tg`)),
+    listener: `${alb}:80`,
   };
 }
 

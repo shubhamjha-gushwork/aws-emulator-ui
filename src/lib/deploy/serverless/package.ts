@@ -151,12 +151,14 @@ export function selectPackageFiles(
   root: string,
   pkg?: { include?: string[]; exclude?: string[]; patterns?: string[] },
 ): string[] {
+  // Legacy package.exclude / package.include map to patterns the way Serverless Framework does:
+  // excludes first, then includes (so an include re-adds what an exclude removed), then patterns.
   const patterns: string[] = [];
-  for (const p of pkg?.include ?? []) if (p) patterns.push(p);
   for (const p of pkg?.exclude ?? []) {
     if (!p) continue;
     patterns.push(p.startsWith('!') ? p : `!${p}`);
   }
+  for (const p of pkg?.include ?? []) if (p) patterns.push(p);
   for (const p of pkg?.patterns ?? []) if (p) patterns.push(p);
   return listSource(root, patterns);
 }
@@ -178,18 +180,16 @@ function listSource(root: string, patterns?: string[]): string[] {
 }
 
 /**
- * Serverless-style package.patterns, applied in order: the last pattern that matches decides
- * (`!` excludes, plain re-includes), so the common `'!**'` then `'**\/*.py'` idiom works.
- * Files no pattern matches are packed only when there are no include patterns at all, which keeps
- * zips to the listed source instead of the whole repo.
+ * Serverless Framework package.patterns: every file starts included; patterns are applied in order and
+ * the last one that matches decides (`!` excludes, a plain pattern re-includes). So `'!**'` then
+ * `'**\/*.py'` packs only .py files, and a file no pattern matches stays included.
  */
 export function matchesPackagePatterns(file: string, patterns: string[]): boolean {
-  let decision: boolean | undefined;
+  let included = true;
   for (const p of patterns) {
-    if (globMatch(file, p)) decision = !p.startsWith('!');
+    if (globMatch(file, p)) included = !p.startsWith('!');
   }
-  if (decision !== undefined) return decision;
-  return !patterns.some((p) => !p.startsWith('!'));
+  return included;
 }
 
 export function globMatch(file: string, pattern: string): boolean {

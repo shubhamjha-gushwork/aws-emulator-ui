@@ -93,8 +93,8 @@ describe('YAML defaults vs missing secret keys', () => {
       },
       provider: {
         environment: {
-          POSTHOG_HOST: "${self:custom.appSecrets.POSTHOG_HOST, 'https://us.posthog.com'}",
-          APEX_PROXY_IPS: "${self:custom.appSecrets.APEX_PROXY_IPS, '1.2.3.4'}",
+          ANALYTICS_HOST: "${self:custom.appSecrets.ANALYTICS_HOST, 'https://analytics.example.com'}",
+          ALLOWED_IPS: "${self:custom.appSecrets.ALLOWED_IPS, '1.2.3.4'}",
           API_TOKEN: '${self:custom.appSecrets.API_TOKEN}',
           EMPTY_DEFAULT: "${self:custom.appSecrets.EMPTY_DEFAULT, ''}",
         },
@@ -103,19 +103,19 @@ describe('YAML defaults vs missing secret keys', () => {
     const c = createCtx({ stage: 'local', region: 'us-east-1', root: doc, fileBase: fixtures, fileEnv: {} });
     interpolateTree(doc, c);
     const env = (doc.provider as { environment: Record<string, string> }).environment;
-    expect(env.POSTHOG_HOST).toBe('https://us.posthog.com');
-    expect(env.APEX_PROXY_IPS).toBe('1.2.3.4');
+    expect(env.ANALYTICS_HOST).toBe('https://analytics.example.com');
+    expect(env.ALLOWED_IPS).toBe('1.2.3.4');
     expect(env.API_TOKEN).toBe(PLACEHOLDER);
     expect(env.EMPTY_DEFAULT).toBe('');
-    expect(env.POSTHOG_HOST).not.toBe(PLACEHOLDER);
-    expect(c.defaultedKeys.has('POSTHOG_HOST')).toBe(true);
-    expect(c.defaultedKeys.has('APEX_PROXY_IPS')).toBe(true);
+    expect(env.ANALYTICS_HOST).not.toBe(PLACEHOLDER);
+    expect(c.defaultedKeys.has('ANALYTICS_HOST')).toBe(true);
+    expect(c.defaultedKeys.has('ALLOWED_IPS')).toBe(true);
     expect(c.defaultedKeys.has('EMPTY_DEFAULT')).toBe(true);
     expect(c.defaultedKeys.has('API_TOKEN')).toBe(false);
     const secrets = collectSecrets(c);
-    expect(secrets[0].keys).toEqual(['APEX_PROXY_IPS', 'API_TOKEN', 'EMPTY_DEFAULT', 'POSTHOG_HOST']);
-    expect(secrets[0].defaulted).toEqual(['APEX_PROXY_IPS', 'EMPTY_DEFAULT', 'POSTHOG_HOST']);
-    expect(JSON.stringify(secrets)).not.toContain('https://us.posthog.com');
+    expect(secrets[0].keys).toEqual(['ALLOWED_IPS', 'ANALYTICS_HOST', 'API_TOKEN', 'EMPTY_DEFAULT']);
+    expect(secrets[0].defaulted).toEqual(['ALLOWED_IPS', 'ANALYTICS_HOST', 'EMPTY_DEFAULT']);
+    expect(JSON.stringify(secrets)).not.toContain('https://analytics.example.com');
   });
 
   it('lets a present env-file value win over the YAML default', () => {
@@ -126,7 +126,7 @@ describe('YAML defaults vs missing secret keys', () => {
       },
       provider: {
         environment: {
-          POSTHOG_HOST: "${self:custom.appSecrets.POSTHOG_HOST, 'https://us.posthog.com'}",
+          ANALYTICS_HOST: "${self:custom.appSecrets.ANALYTICS_HOST, 'https://analytics.example.com'}",
           API_TOKEN: '${self:custom.appSecrets.API_TOKEN}',
         },
       },
@@ -137,14 +137,14 @@ describe('YAML defaults vs missing secret keys', () => {
       region: 'us-east-1',
       root: doc,
       fileBase: fixtures,
-      fileEnv: { POSTHOG_HOST: hidden },
+      fileEnv: { ANALYTICS_HOST: hidden },
     });
     interpolateTree(doc, c);
     const env = (doc.provider as { environment: Record<string, string> }).environment;
-    expect(env.POSTHOG_HOST).toBe(hidden);
-    expect(env.POSTHOG_HOST).not.toBe('https://us.posthog.com');
+    expect(env.ANALYTICS_HOST).toBe(hidden);
+    expect(env.ANALYTICS_HOST).not.toBe('https://analytics.example.com');
     expect(env.API_TOKEN).toBe(PLACEHOLDER);
-    expect(c.defaultedKeys.has('POSTHOG_HOST')).toBe(false);
+    expect(c.defaultedKeys.has('ANALYTICS_HOST')).toBe(false);
     const secrets = collectSecrets(c);
     expect(secrets[0].defaulted).toEqual([]);
     expect(JSON.stringify(secrets)).not.toContain(hidden);
@@ -173,7 +173,7 @@ custom:
   appSecrets: \${ssm:/aws/reference/secretsmanager/\${self:custom.stage}/app-secrets}
 provider:
   environment:
-    POSTHOG_HOST: \${self:custom.appSecrets.POSTHOG_HOST, 'https://us.posthog.com'}
+    ANALYTICS_HOST: \${self:custom.appSecrets.ANALYTICS_HOST, 'https://analytics.example.com'}
     API_TOKEN: \${self:custom.appSecrets.API_TOKEN}
     FROM_FILE: \${self:custom.appSecrets.FROM_FILE, 'should-not-win'}
 functions:
@@ -190,13 +190,13 @@ functions:
     const plan = annotatePlan(planServerless(parsed), { FROM_FILE: hidden });
     const ph = plan.placeholders[0];
     expect(ph.filled).toEqual(['FROM_FILE']);
-    expect(ph.defaulted).toEqual(['POSTHOG_HOST']);
+    expect(ph.defaulted).toEqual(['ANALYTICS_HOST']);
     expect(ph.missing).toEqual(['API_TOKEN']);
     const dumped = JSON.stringify(plan.placeholders);
     expect(dumped).not.toContain(hidden);
     expect(dumped).not.toContain('should-not-win');
-    expect(dumped).not.toContain('https://us.posthog.com');
-    expect(parsed.environment.POSTHOG_HOST).toBe('https://us.posthog.com');
+    expect(dumped).not.toContain('https://analytics.example.com');
+    expect(parsed.environment.ANALYTICS_HOST).toBe('https://analytics.example.com');
     expect(parsed.environment.FROM_FILE).toBe(hidden);
     expect(parsed.environment.API_TOKEN).toBe(PLACEHOLDER);
     fs.rmSync(dir, { recursive: true, force: true });

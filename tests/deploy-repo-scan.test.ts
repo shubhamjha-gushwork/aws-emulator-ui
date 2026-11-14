@@ -23,48 +23,84 @@ function write(name: string, body: string): string {
 
 const ARN = 'arn:aws:secretsmanager:us-east-1:000000000000:secret';
 
-describe('trinity: stage-keyed environment.refs', () => {
+describe('stage fallback (--fallback-stage) for stage-keyed lookups', () => {
   const yml = `
 name: sample-svc
 region: us-east-1
 environment:
   refs:
-    secretsdev: ${ARN}:dev/sample-app-*
-    secretsprod: ${ARN}:prod/sample-app-*
-    jobSecrets-prod: ${ARN}:prod/sample-jobs-AbCdEf
+    credsdev: ${ARN}:dev/sample-app-AbCdEf
+    credsprod: ${ARN}:prod/sample-app-AbCdEf
+    otherCreds-prod: ${ARN}:prod/sample-other-AbCdEf
   variables:
-    API_TOKEN: \${environment.refs.secrets\${custom.stage}.API_TOKEN}
+    API_TOKEN: \${environment.refs.creds\${custom.stage}.API_TOKEN}
 custom:
   dev:
     cpu: 512
   prod:
     cpu: 1024
+    desiredCapacity: 3
 stacks:
   HTTPApi:
     - name: sample-web
       dockerfile: Dockerfile
       cpu: \${custom.\${custom.stage}.cpu}
+      desiredCapacity: \${custom.\${custom.stage}.desiredCapacity}
       environment:
-        JOB_KEY: \${environment.refs.jobSecrets-\${custom.stage}.JOB_KEY}
+        OTHER_KEY: \${environment.refs.otherCreds-\${custom.stage}.OTHER_KEY}
+        WITH_DEFAULT: \${custom.\${custom.stage}.missing, 'explicit'}
         BROKEN: \${environment.refs.nothere.KEY}
 `;
-  const parse = () => parseTrinityFile(write('trinity.yml', yml), { stage: 'local', region: 'us-east-1', env: {}, fileEnv: {} });
+  const parse = (fallbackStages?: string[]) => parseTrinityFile(write('trinity.yml', yml), { stage: 'local', region: 'us-east-1', env: {}, fileEnv: {}, fallbackStages });
 
-  it('falls back to the dev ref (like custom.dev) instead of silently dropping env vars', () => {
+  it('retries a stage-keyed lookup with the fallback stage (default dev), for custom blocks and refs alike', () => {
     const p = parse();
     const task = p.stacks[0].tasks[0];
     expect(task.environment?.API_TOKEN).toBe('PLACEHOLDER');
     expect(task.cpu).toBe(512);
     const plan = planTrinity(p);
-    const dev = plan.placeholders.find((s) => s.name === 'aws-emulator/local/dev/sample-app');
-    expect(dev?.keys).toEqual(['API_TOKEN']);
-    expect(plan.warnings.some((w) => w.includes('environment.refs.secretslocal') && w.includes('secretsdev'))).toBe(true);
+    expect(plan.placeholders.find((s) => s.name === 'aws-emulator/local/dev/sample-app')?.keys).toEqual(['API_TOKEN']);
+    expect(plan.warnings).toContain('environment.refs.credslocal is not defined for stage local; using environment.refs.credsdev (fallback stage dev, see --fallback-stage)');
+    expect(plan.warnings).toContain('custom.local is not defined for stage local; using custom.dev (fallback stage dev, see --fallback-stage)');
   });
 
-  it('uses the only stage ref there is when no dev ref exists', () => {
+  it('does not guess: a key only another stage defines stays unresolved unless that stage is listed', () => {
     const p = parse();
-    expect(p.stacks[0].tasks[0].environment?.JOB_KEY).toBe('PLACEHOLDER');
-    expect(planTrinity(p).placeholders.find((s) => s.name === 'aws-emulator/local/prod/sample-jobs')?.keys).toEqual(['JOB_KEY']);
+    expect(p.stacks[0].tasks[0].environment?.OTHER_KEY).toBeUndefined();
+    expect(p.stacks[0].tasks[0].desiredCount).toBeUndefined();
+    const withProd = parse(['dev', 'prod']);
+    expect(withProd.stacks[0].tasks[0].environment?.OTHER_KEY).toBe('PLACEHOLDER');
+    expect(withProd.stacks[0].tasks[0].cpu).toBe(512);
+    expect(withProd.stacks[0].tasks[0].desiredCount).toBe(3);
+  });
+
+  it('can be turned off, and never overrides an explicit default', () => {
+    const off = parse([]);
+    expect(off.stacks[0].tasks[0].cpu).toBeUndefined();
+    expect(off.stacks[0].tasks[0].environment?.API_TOKEN).toBeUndefined();
+    expect(parse().stacks[0].tasks[0].environment?.WITH_DEFAULT).toBe('explicit');
+  });
+
+  it('applies the same rule to serverless.yml lookups', () => {
+    const file = write('serverless.yml', `
+service: sample-fb
+provider:
+  name: aws
+  runtime: nodejs20.x
+  environment:
+    LEVEL: \${self:custom.settings.\${sls:stage}.level}
+    SIZE: \${self:custom.settings.\${opt:stage}.size, 'small'}
+custom:
+  settings:
+    dev:
+      level: debug
+      size: large
+`);
+    const p = parseServerlessFile(file, { stage: 'qa', region: 'us-east-1', env: {}, fileEnv: {} });
+    expect(p.environment.LEVEL).toBe('debug');
+    expect(p.environment.SIZE).toBe('small');
+    expect(p.warnings.some((w) => w.startsWith('self:custom.settings.qa is not defined for stage qa; using self:custom.settings.dev'))).toBe(true);
+    expect(parseServerlessFile(file, { stage: 'qa', region: 'us-east-1', env: {}, fileEnv: {}, fallbackStages: [] }).environment.LEVEL).toBeUndefined();
   });
 
   it('does not create secrets for refs nothing reads, and says so', () => {
@@ -77,30 +113,6 @@ stacks:
     const p = parse();
     expect(p.stacks[0].tasks[0].environment?.BROKEN).toBeUndefined();
     expect(p.warnings.some((w) => w.includes('${environment.refs.nothere.KEY} could not be resolved'))).toBe(true);
-  });
-});
-
-describe('trinity: prod-only custom block', () => {
-  it('uses the only stage block when there is no dev block, with a warning', () => {
-    const file = write('trinity.yml', `
-name: sample-mon
-custom:
-  prod:
-    cpu: 1024
-    desiredCapacity: 3
-stacks:
-  Fargate:
-    - clusterName: sample-mon
-      tasks:
-        - name: sample-task
-          dockerfile: Dockerfile
-          cpu: \${custom.\${custom.stage}.cpu}
-          desiredCapacity: \${custom.\${custom.stage}.desiredCapacity}
-`);
-    const p = parseTrinityFile(file, { stage: 'local', region: 'us-east-1', env: {}, fileEnv: {} });
-    expect(p.stacks[0].tasks[0].cpu).toBe(1024);
-    expect(p.stacks[0].tasks[0].desiredCount).toBe(3);
-    expect(p.warnings).toContain('custom.local is not defined; using custom.prod for stage local');
   });
 });
 
@@ -170,7 +182,8 @@ functions:
 
   it('shows lift construct, GetAtt and in-stack queue-name sources readably', () => {
     const esm = plan().resources.filter((r) => r.kind === 'event-source-mapping').map((r) => r.name);
-    expect(esm.find((n) => n.includes('fromDlq'))).toContain('jobs-qa-dlq (lift construct in this stack)');
+    // Lift names queues <service>-<stage>-<id> and the DLQ <queue>-dlq.
+    expect(esm.find((n) => n.includes('fromDlq'))).toContain('sample-q-qa-jobs-dlq (lift construct in this stack)');
     expect(esm.find((n) => n.includes('fromDlq'))).not.toContain('__CONSTRUCT__');
     expect(esm.find((n) => n.includes('fromStack'))).toContain('InboxQueue (from this stack)');
     expect(esm.find((n) => n.includes('fromName'))).toContain('sample-inbox-qa (from this stack)');

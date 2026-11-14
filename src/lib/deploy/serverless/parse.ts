@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { collectSecrets, createCtx, interpolateTree, PLACEHOLDER, SecretBag, type InterpCtx } from '../interpolate';
-import { encodeIntrinsic, fitName, isIntrinsic, LIMITS, resolveIntrinsic } from '../cfn';
+import { encodeIntrinsic, fitGeneratedName, fitName, invalidName, isIntrinsic, NAME_RULES, nameKindForCfn, resolveIntrinsic } from '../cfn';
 import { loadYaml } from '../yaml';
 import { type Plan, type PlannedResource, uiHref, type ResourceKind } from '../types';
 import { noRunDetail } from '../run-mode';
@@ -58,6 +58,8 @@ export interface LiftQueue {
   fifo?: boolean;
   batchSize?: number;
   maxConcurrency?: number;
+  /** Lift `maxRetries` (default 3): the DLQ redrive maxReceiveCount. */
+  maxRetries: number;
   worker: { handler?: string; image?: unknown; timeout?: number; memorySize?: number; environment?: Record<string, string> };
 }
 
@@ -77,7 +79,6 @@ export interface ParsedServerless {
   stepFunctions: { name: string; definition: unknown }[];
   packagePatterns?: { include?: string[]; exclude?: string[]; patterns?: string[]; individually?: boolean };
   esbuild?: Record<string, unknown>;
-  pythonRequirements?: boolean;
   ctx: InterpCtx;
   warnings: string[];
   unsupported: string[];
@@ -111,11 +112,28 @@ function strEnv(env: unknown): Record<string, string> {
   return out;
 }
 
-export function parseServerlessFile(file: string, opts: { stage: string; region: string; accountId?: string; env?: NodeJS.Dict<string>; fileEnv?: NodeJS.Dict<string>; regionFromFlag?: boolean }): ParsedServerless {
+/**
+ * Plugins whose configuration this tool translates itself. Any other plugin is reported as not run,
+ * since its behaviour is not emulated.
+ */
+export const EMULATED_PLUGINS: Record<string, string> = {
+  'serverless-lift': 'constructs of type queue',
+  'serverless-step-functions': 'stepFunctions.stateMachines',
+  'serverless-esbuild': 'custom.esbuild bundling',
+};
+
+/** `plugins` is a list, or `{ modules: [...], localPath }` (Serverless Framework). */
+export function pluginNames(v: unknown): string[] {
+  if (Array.isArray(v)) return v.map(String);
+  const modules = asRecord(v).modules;
+  return Array.isArray(modules) ? modules.map(String) : [];
+}
+
+export function parseServerlessFile(file: string, opts: { stage: string; region: string; accountId?: string; env?: NodeJS.Dict<string>; fileEnv?: NodeJS.Dict<string>; regionFromFlag?: boolean; fallbackStages?: string[] }): ParsedServerless {
   const raw = fs.readFileSync(file, 'utf8');
   const doc = asRecord(loadYaml(raw, file));
   const root = path.dirname(file);
-  const ctx = createCtx({ stage: opts.stage, region: opts.region, accountId: opts.accountId, root: doc, fileBase: root, env: opts.env, fileEnv: opts.fileEnv });
+  const ctx = createCtx({ stage: opts.stage, region: opts.region, accountId: opts.accountId, root: doc, fileBase: root, env: opts.env, fileEnv: opts.fileEnv, fallbackStages: opts.fallbackStages, dialect: 'serverless' });
   interpolateTree(doc, ctx);
 
   const warnings = [...ctx.warnings];
@@ -126,13 +144,12 @@ export function parseServerlessFile(file: string, opts: { stage: string; region:
   const runtime = asString(provider.runtime);
   // --region wins (as with `serverless deploy --region`); otherwise provider.region, then the default.
   const region = opts.regionFromFlag ? opts.region : asString(provider.region) || opts.region;
-  const stage = asString(custom.stage) || opts.stage;
+  // The stage is --stage (as with `serverless deploy --stage`); ${opt:stage} / ${sls:stage} resolve to it.
+  const stage = opts.stage;
 
-  const plugins = (Array.isArray(doc.plugins) ? doc.plugins : []).map(String);
+  const plugins = pluginNames(doc.plugins);
   for (const p of plugins) {
-    if (/domain-manager|global-authorizer|prune|disable-functions/i.test(p)) {
-      unsupported.push(`plugin ${p} is ignored (not applied on Floci)`);
-    }
+    if (!EMULATED_PLUGINS[p]) unsupported.push(`plugin ${p} is not run; its effects are not emulated`);
   }
 
   const functions: SlsFunction[] = [];
@@ -184,7 +201,8 @@ export function parseServerlessFile(file: string, opts: { stage: string; region:
     const ext = asRecord(asRecord(c.extensions).queue);
     const props = asRecord(ext.Properties);
     const fifo = Boolean(c.fifo);
-    const baseName = asString(props.QueueName) || `${name}-${stage}`;
+    // Lift names queues <service>-<stage>-<construct id> (its stack name plus the id), unless overridden via extensions.
+    const baseName = asString(props.QueueName) || `${service}-${stage}-${name}`;
     const queueName = fifo && !baseName.endsWith('.fifo') ? `${baseName}.fifo` : baseName;
     const worker = asRecord(c.worker);
     liftQueues.push({
@@ -193,6 +211,7 @@ export function parseServerlessFile(file: string, opts: { stage: string; region:
       fifo: fifo || queueName.endsWith('.fifo'),
       batchSize: num(c.batchSize),
       maxConcurrency: num(c.maxConcurrency),
+      maxRetries: num(c.maxRetries) ?? 3,
       worker: {
         handler: asString(worker.handler),
         image: worker.image,
@@ -245,7 +264,6 @@ export function parseServerlessFile(file: string, opts: { stage: string; region:
       individually: Boolean(pkg.individually),
     },
     esbuild: Object.keys(asRecord(custom.esbuild)).length ? asRecord(custom.esbuild) : undefined,
-    pythonRequirements: plugins.some((p) => /python-requirements|uv-requirements/i.test(p)),
     ctx,
     warnings,
     unsupported,
@@ -302,29 +320,26 @@ function parseSns(raw: unknown): SlsSns {
 
 /** Lift dead-letter queue name: <queue>-dlq(.fifo), kept within the SQS name limit. */
 export function liftDlqName(queueName: string, fifo: boolean): string {
-  return fitName(`${queueName.replace(/\.fifo$/, '')}-dlq`, LIMITS.sqs - (fifo ? 5 : 0)) + (fifo ? '.fifo' : '');
+  const suffix = fifo ? '.fifo' : '';
+  return `${fitName(`${queueName.replace(/\.fifo$/, '')}-dlq`, NAME_RULES.sqs.max - suffix.length)}${suffix}`;
 }
 
-/** Rule names derived from the function name, shortened to EventBridge's 64-char limit. */
+/** Rule names derived from the function name, shortened to EventBridge's rule-name limit. */
 export function scheduleRuleName(fnName: string, index: number): string {
-  return fitName(index === 0 ? `${fnName}-schedule` : `${fnName}-schedule-${index + 1}`, LIMITS.rule);
+  return fitGeneratedName('rule', index === 0 ? `${fnName}-schedule` : `${fnName}-schedule-${index + 1}`);
 }
 
 export function eventBridgeRuleName(fnName: string, index: number): string {
-  return fitName(index === 0 ? `${fnName}-eb` : `${fnName}-eb-${index + 1}`, LIMITS.rule);
+  return fitGeneratedName('rule', index === 0 ? `${fnName}-eb` : `${fnName}-eb-${index + 1}`);
 }
 
 /** Name validation shared by plan and apply. Returns a reason when the name cannot be created. */
 export function invalidLambdaName(name: string): string | undefined {
-  if (name.length > LIMITS.lambda) return `function name ${name} is ${name.length} chars (Lambda limit ${LIMITS.lambda}); skipped`;
-  if (!/^[a-zA-Z0-9-_]+$/.test(name)) return `function name ${name} has characters Lambda does not allow; skipped`;
-  return undefined;
+  return invalidName('lambda', name);
 }
 
 export function invalidQueueName(name: string): string | undefined {
-  if (name.length > LIMITS.sqs) return `queue name ${name} is ${name.length} chars (SQS limit ${LIMITS.sqs}); skipped`;
-  if (!/^[a-zA-Z0-9_-]+(\.fifo)?$/.test(name)) return `queue name ${name} has characters SQS does not allow; skipped`;
-  return undefined;
+  return invalidName('sqs', name);
 }
 
 /** Physical name for a CloudFormation resource, as apply will create it (intrinsics resolved when possible). */
@@ -430,8 +445,9 @@ export function planServerless(parsed: ParsedServerless, opts: { noRun?: boolean
       continue;
     }
     const name = cfnPhysicalName(logical, r, pseudo);
-    if (kind === 'sqs' && name) {
-      const bad = invalidQueueName(name);
+    const nameKind = nameKindForCfn(r.Type);
+    if (nameKind && name) {
+      const bad = invalidName(nameKind, name);
       if (bad) {
         warnings.push(bad);
         continue;
@@ -489,8 +505,9 @@ export function planServerless(parsed: ParsedServerless, opts: { noRun?: boolean
     if (fn.image) unsupported.push(`${fn.name} uses a container image — provide a local image or skip`);
   }
   for (const sm of parsed.stepFunctions) {
-    if (sm.name.length > LIMITS.sfn) {
-      warnings.push(`state machine name ${sm.name} is ${sm.name.length} chars (limit ${LIMITS.sfn}); skipped`);
+    const bad = invalidName('sfn', sm.name);
+    if (bad) {
+      warnings.push(bad);
       continue;
     }
     add('sfn', sm.name);
