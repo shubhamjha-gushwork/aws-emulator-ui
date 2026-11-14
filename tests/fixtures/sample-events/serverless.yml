@@ -1,0 +1,137 @@
+service: sample-events
+plugins:
+  - serverless-step-functions
+  - serverless-lift
+provider:
+  name: aws
+  runtime: nodejs20.x
+  stage: ${opt:stage, 'dev'}
+  environment:
+    QUEUE_URL: !Ref WorkQueue
+    TABLE: { Ref: ItemsTable }
+    TOPIC_ARN: !Ref AlertsTopic
+functions:
+  api:
+    handler: src/a.handler
+    events:
+      - http:
+          path: /items/{id}
+          method: get
+      - http: POST /items
+      - http:
+          path: /any
+          method: any
+      - httpApi: 'GET /v2/items'
+      - httpApi: '*'
+  this-function-name-is-deliberately-far-too-long-for-the-lambda-limit:
+    handler: src/a.handler
+  worker:
+    handler: src/b.handler
+    events:
+      - sqs:
+          arn: !GetAtt WorkQueue.Arn
+          batchSize: 5
+      - sqs:
+          arn: { 'Fn::Join': [':', ['arn:aws:sqs', { Ref: 'AWS::Region' }, { Ref: 'AWS::AccountId' }, 'sample-events-other-${sls:stage}']] }
+      - schedule: rate(10 minutes)
+      - schedule: cron(0 12 * * ? *)
+      - schedule:
+          rate:
+            - rate(1 hour)
+            - cron(0 6 * * ? *)
+          enabled: false
+          input:
+            k: v
+      - sns: sample-events-topic-${sls:stage}
+      - sns:
+          arn: !Ref AlertsTopic
+          topicName: sample-events-alerts
+      - s3:
+          bucket: sample-events-uploads-${sls:stage}
+          event: s3:ObjectCreated:*
+      - eventBridge:
+          pattern:
+            source: [sample.app]
+      - eventBridge:
+          eventBus: sample-events-bus
+          pattern:
+            source: [sample.other]
+      - websocket: $connect
+      - alb:
+          listenerArn: arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/x/y/z
+          priority: 1
+          conditions:
+            path: /x
+      - cloudwatchLog: /aws/foo
+      - stream:
+          type: dynamodb
+          arn: !GetAtt ItemsTable.StreamArn
+stepFunctions:
+  stateMachines:
+    flow:
+      name: sample-events-flow-${sls:stage}
+      events:
+        - schedule: rate(1 day)
+      definition:
+        StartAt: Call
+        States:
+          Call:
+            Type: Task
+            Resource: !GetAtt api.Arn
+            Next: Invoke2
+          Invoke2:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: { Ref: worker }
+              Payload.$: $
+            End: true
+constructs:
+  samplejobs:
+    type: queue
+    worker:
+      handler: src/b.handler
+  site:
+    type: static-website
+    path: public
+resources:
+  Resources:
+    WorkDlq:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: !Sub 'sample-events-dlq-${AWS::Region}'
+    WorkQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: !Join ['-', [sample-events, work, '${sls:stage}']]
+        VisibilityTimeout: 120
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt WorkDlq.Arn
+          maxReceiveCount: 3
+    OtherQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: sample-events-other-${sls:stage}
+    FifoQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: sample-events-ordered.fifo
+        FifoQueue: true
+    ItemsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: sample-events-items-${sls:stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions: [{ AttributeName: pk, AttributeType: S }]
+        KeySchema: [{ AttributeName: pk, KeyType: HASH }]
+    AlertsTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: sample-events-alerts
+    Role:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: x
+  Outputs:
+    Q:
+      Value: !Ref WorkQueue

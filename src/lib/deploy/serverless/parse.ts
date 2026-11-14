@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { collectSecrets, createCtx, interpolateTree, type InterpCtx, type SecretBag } from '../interpolate';
+import { collectSecrets, createCtx, interpolateTree, PLACEHOLDER, SecretBag, type InterpCtx } from '../interpolate';
+import { encodeIntrinsic, fitName, isIntrinsic, LIMITS, resolveIntrinsic } from '../cfn';
 import { loadYaml } from '../yaml';
 import { type Plan, type PlannedResource, uiHref, type ResourceKind } from '../types';
 import { noRunDetail } from '../run-mode';
@@ -26,13 +27,29 @@ export interface SlsFunction {
   events: {
     http?: SlsHttpEvent;
     httpApi?: SlsHttpEvent;
-    schedule?: string | { rate: string; enabled?: boolean; input?: unknown };
-    sqs?: { arn: string | Record<string, unknown>; batchSize?: number; maximumConcurrency?: number };
+    schedule?: SlsSchedule;
+    sqs?: { arn: string | Record<string, unknown>; batchSize?: number; maximumConcurrency?: number; enabled?: boolean };
     s3?: { bucket: string; event?: string; existing?: boolean; rules?: unknown };
     eventBridge?: Record<string, unknown>;
-    sns?: unknown;
+    sns?: SlsSns;
     other?: string;
   }[];
+  /** Function-level package.patterns (used with package.individually). */
+  packagePatterns?: string[];
+  layers?: unknown[];
+}
+
+export interface SlsSchedule {
+  /** One rule per expression (Serverless accepts a list under rate). */
+  rates: string[];
+  enabled: boolean;
+  input?: unknown;
+}
+
+export interface SlsSns {
+  topicName?: string;
+  arn?: unknown;
+  filterPolicy?: unknown;
 }
 
 export interface LiftQueue {
@@ -76,16 +93,25 @@ function asString(v: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Lambda environment values must be strings. Numbers/booleans are stringified, an unresolved
+ * secret becomes PLACEHOLDER (filled from the env file by variable name), and CloudFormation
+ * intrinsics ({ Ref }, !GetAtt …) are kept as tokens resolved once resources exist.
+ */
 function strEnv(env: unknown): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(asRecord(env))) {
+    if (v === undefined || v === null) continue;
     const s = asString(v);
     if (s !== undefined) out[k] = s;
+    else if (v instanceof SecretBag) out[k] = PLACEHOLDER;
+    else if (isIntrinsic(v)) out[k] = encodeIntrinsic(v);
+    else if (typeof v === 'object') out[k] = JSON.stringify(v);
   }
   return out;
 }
 
-export function parseServerlessFile(file: string, opts: { stage: string; region: string; accountId?: string; env?: NodeJS.Dict<string>; fileEnv?: NodeJS.Dict<string> }): ParsedServerless {
+export function parseServerlessFile(file: string, opts: { stage: string; region: string; accountId?: string; env?: NodeJS.Dict<string>; fileEnv?: NodeJS.Dict<string>; regionFromFlag?: boolean }): ParsedServerless {
   const raw = fs.readFileSync(file, 'utf8');
   const doc = asRecord(loadYaml(raw, file));
   const root = path.dirname(file);
@@ -98,7 +124,8 @@ export function parseServerlessFile(file: string, opts: { stage: string; region:
   const provider = asRecord(doc.provider);
   const custom = asRecord(doc.custom);
   const runtime = asString(provider.runtime);
-  const region = asString(provider.region) || opts.region;
+  // --region wins (as with `serverless deploy --region`); otherwise provider.region, then the default.
+  const region = opts.regionFromFlag ? opts.region : asString(provider.region) || opts.region;
   const stage = asString(custom.stage) || opts.stage;
 
   const plugins = (Array.isArray(doc.plugins) ? doc.plugins : []).map(String);
@@ -121,11 +148,11 @@ export function parseServerlessFile(file: string, opts: { stage: string; region:
       const e = asRecord(ev);
       if ('http' in e) evs.push({ http: parseHttp(e.http) });
       else if ('httpApi' in e) evs.push({ httpApi: parseHttp(e.httpApi) });
-      else if ('schedule' in e) evs.push({ schedule: e.schedule as SlsFunction['events'][0]['schedule'] });
+      else if ('schedule' in e) evs.push({ schedule: parseSchedule(e.schedule) });
       else if ('sqs' in e) evs.push({ sqs: parseSqs(e.sqs) });
       else if ('s3' in e) evs.push({ s3: parseS3(e.s3) });
       else if ('eventBridge' in e) evs.push({ eventBridge: asRecord(e.eventBridge) });
-      else if ('sns' in e) evs.push({ sns: e.sns });
+      else if ('sns' in e) evs.push({ sns: parseSns(e.sns) });
       else evs.push({ other: Object.keys(e)[0] });
     }
     functions.push({
@@ -139,8 +166,13 @@ export function parseServerlessFile(file: string, opts: { stage: string; region:
       memory: num(f.memorySize) ?? num(provider.memorySize),
       environment: { ...strEnv(provider.environment), ...strEnv(f.environment) },
       events: evs,
+      packagePatterns: arr(asRecord(f.package).patterns),
+      layers: Array.isArray(f.layers) ? f.layers : undefined,
     });
+    if (Array.isArray(f.layers) && f.layers.length) unsupported.push(`layers on ${name} are not attached (bundle dependencies into the function instead)`);
   }
+  if (Object.keys(asRecord(doc.layers)).length) unsupported.push(`layers (${Object.keys(asRecord(doc.layers)).join(', ')}) are not published`);
+  if (Array.isArray(provider.layers) && provider.layers.length) unsupported.push('provider.layers are not attached');
 
   const liftQueues: LiftQueue[] = [];
   for (const [name, def] of Object.entries(asRecord(doc.constructs))) {
@@ -151,12 +183,14 @@ export function parseServerlessFile(file: string, opts: { stage: string; region:
     }
     const ext = asRecord(asRecord(c.extensions).queue);
     const props = asRecord(ext.Properties);
-    const queueName = asString(props.QueueName) || `${name}-${stage}`;
+    const fifo = Boolean(c.fifo);
+    const baseName = asString(props.QueueName) || `${name}-${stage}`;
+    const queueName = fifo && !baseName.endsWith('.fifo') ? `${baseName}.fifo` : baseName;
     const worker = asRecord(c.worker);
     liftQueues.push({
       name,
       queueName,
-      fifo: Boolean(c.fifo) || queueName.endsWith('.fifo'),
+      fifo: fifo || queueName.endsWith('.fifo'),
       batchSize: num(c.batchSize),
       maxConcurrency: num(c.maxConcurrency),
       worker: {
@@ -185,6 +219,7 @@ export function parseServerlessFile(file: string, opts: { stage: string; region:
   for (const [name, body] of Object.entries(asRecord(sfn.stateMachines))) {
     const sm = asRecord(body);
     stepFunctions.push({ name: asString(sm.name) || `${service}-${stage}-${name}`, definition: sm.definition ?? sm.Definition });
+    if (Array.isArray(sm.events) && sm.events.length) unsupported.push(`events on state machine ${name} are not created`);
   }
 
   const pkg = asRecord(doc.package);
@@ -247,11 +282,80 @@ function parseHttp(raw: unknown): SlsHttpEvent {
   };
 }
 
+function parseSchedule(raw: unknown): SlsSchedule {
+  if (typeof raw === 'string') return { rates: [raw], enabled: true };
+  const s = asRecord(raw);
+  const rate = s.rate;
+  const rates = (Array.isArray(rate) ? rate : [rate]).map((r) => asString(r)).filter((r): r is string => Boolean(r));
+  return { rates, enabled: s.enabled === undefined ? true : s.enabled !== false && s.enabled !== 'false', input: s.input };
+}
+
+function parseSns(raw: unknown): SlsSns {
+  if (typeof raw === 'string') {
+    return raw.startsWith('arn:') ? { arn: raw, topicName: raw.split(':').pop() } : { topicName: raw };
+  }
+  const s = asRecord(raw);
+  const arn = s.arn;
+  const fromArn = typeof arn === 'string' && arn.startsWith('arn:') ? arn.split(':').pop() : undefined;
+  return { topicName: asString(s.topicName) || fromArn, arn, filterPolicy: s.filterPolicy };
+}
+
+/** Lift dead-letter queue name: <queue>-dlq(.fifo), kept within the SQS name limit. */
+export function liftDlqName(queueName: string, fifo: boolean): string {
+  return fitName(`${queueName.replace(/\.fifo$/, '')}-dlq`, LIMITS.sqs - (fifo ? 5 : 0)) + (fifo ? '.fifo' : '');
+}
+
+/** Rule names derived from the function name, shortened to EventBridge's 64-char limit. */
+export function scheduleRuleName(fnName: string, index: number): string {
+  return fitName(index === 0 ? `${fnName}-schedule` : `${fnName}-schedule-${index + 1}`, LIMITS.rule);
+}
+
+export function eventBridgeRuleName(fnName: string, index: number): string {
+  return fitName(index === 0 ? `${fnName}-eb` : `${fnName}-eb-${index + 1}`, LIMITS.rule);
+}
+
+/** Name validation shared by plan and apply. Returns a reason when the name cannot be created. */
+export function invalidLambdaName(name: string): string | undefined {
+  if (name.length > LIMITS.lambda) return `function name ${name} is ${name.length} chars (Lambda limit ${LIMITS.lambda}); skipped`;
+  if (!/^[a-zA-Z0-9-_]+$/.test(name)) return `function name ${name} has characters Lambda does not allow; skipped`;
+  return undefined;
+}
+
+export function invalidQueueName(name: string): string | undefined {
+  if (name.length > LIMITS.sqs) return `queue name ${name} is ${name.length} chars (SQS limit ${LIMITS.sqs}); skipped`;
+  if (!/^[a-zA-Z0-9_-]+(\.fifo)?$/.test(name)) return `queue name ${name} has characters SQS does not allow; skipped`;
+  return undefined;
+}
+
+/** Physical name for a CloudFormation resource, as apply will create it (intrinsics resolved when possible). */
+export function cfnPhysicalName(logical: string, r: { Type: string; Properties?: Record<string, unknown> }, pseudo: { region: string; stackName: string }, resolved = {}): string | undefined {
+  const p = r.Properties ?? {};
+  const pick = (v: unknown) => {
+    if (v === undefined || v === null) return undefined;
+    const out = resolveIntrinsic(v, resolved, pseudo);
+    return typeof out === 'string' ? out : undefined;
+  };
+  switch (r.Type) {
+    case 'AWS::SQS::Queue': {
+      const raw = p.QueueName === undefined ? logical : pick(p.QueueName);
+      if (raw === undefined) return undefined;
+      const fifo = p.FifoQueue === true || p.FifoQueue === 'true';
+      return fifo && !raw.endsWith('.fifo') ? `${raw}.fifo` : raw;
+    }
+    case 'AWS::S3::Bucket': return p.BucketName === undefined ? logical.toLowerCase() : pick(p.BucketName);
+    case 'AWS::SNS::Topic': return p.TopicName === undefined ? logical : pick(p.TopicName);
+    case 'AWS::DynamoDB::Table': return p.TableName === undefined ? logical : pick(p.TableName);
+    case 'AWS::SecretsManager::Secret': return p.Name === undefined ? logical : pick(p.Name);
+    case 'AWS::Logs::LogGroup': return p.LogGroupName === undefined ? logical : pick(p.LogGroupName);
+    default: return logical;
+  }
+}
+
 function parseSqs(raw: unknown): NonNullable<SlsFunction['events'][0]['sqs']> {
   if (typeof raw === 'string') return { arn: raw };
   const s = asRecord(raw);
   const arn = s.arn ?? s;
-  return { arn: arn as string | Record<string, unknown>, batchSize: num(s.batchSize), maximumConcurrency: num(s.maximumConcurrency) ?? num(s.maxConcurrency) };
+  return { arn: arn as string | Record<string, unknown>, batchSize: num(s.batchSize), maximumConcurrency: num(s.maximumConcurrency) ?? num(s.maxConcurrency), enabled: s.enabled === false ? false : undefined };
 }
 
 function parseS3(raw: unknown): NonNullable<SlsFunction['events'][0]['s3']> {
@@ -268,49 +372,94 @@ function num(v: unknown): number | undefined {
 function arr(v: unknown): string[] | undefined {
   return Array.isArray(v) ? v.map(String) : undefined;
 }
-function normalizeLogical(name: string): string {
-  return name.replace(/[^A-Za-z0-9]/g, '');
+/** Serverless Framework logical id naming: hello → Hello, my-fn → MyDashfn, my_fn → MyUnderscorefn. */
+export function normalizeLogical(name: string): string {
+  const n = name.replace(/-/g, 'Dash').replace(/_/g, 'Underscore').replace(/[^A-Za-z0-9]/g, '');
+  return n.charAt(0).toUpperCase() + n.slice(1);
 }
 
 export function planServerless(parsed: ParsedServerless, opts: { noRun?: boolean } = {}): Plan {
   const resources: PlannedResource[] = [];
+  const warnings = [...parsed.warnings];
+  const unsupported = [...parsed.unsupported];
   const add = (kind: ResourceKind, name: string, detail?: string) => {
     resources.push({ kind, name, action: 'create', detail, href: uiHref(kind, name) });
+  };
+  const pseudo = { region: parsed.region, stackName: `${parsed.service}-${parsed.stage}` };
+  const buses = new Set<string>();
+  const showArn = (v: unknown) => {
+    if (typeof v === 'string') return v;
+    const r = resolveIntrinsic(v, {}, pseudo);
+    if (typeof r === 'string') return r;
+    const id = refTarget(v);
+    return id ? `${id} (from this stack)` : JSON.stringify(v);
   };
 
   for (const s of collectSecrets(parsed.ctx)) add('secret', s.name, s.keys.length ? `keys: ${s.keys.join(', ')}` : 'placeholder JSON (keys discovered at interpolate time)');
   for (const [logical, r] of Object.entries(parsed.cfnResources)) {
     const kind = cfnKind(r.Type);
     if (!kind) {
-      parsed.unsupported.push(`CloudFormation ${r.Type} (${logical}) is not created`);
+      unsupported.push(`CloudFormation ${r.Type} (${logical}) is not created`);
       continue;
     }
-    const name = asString(r.Properties?.Name) || asString(r.Properties?.QueueName) || asString(r.Properties?.BucketName) || asString(r.Properties?.TableName) || asString(r.Properties?.TopicName) || logical;
-    add(kind, name, r.Type);
+    const name = cfnPhysicalName(logical, r, pseudo);
+    if (kind === 'sqs' && name) {
+      const bad = invalidQueueName(name);
+      if (bad) {
+        warnings.push(bad);
+        continue;
+      }
+    }
+    add(kind, name ?? `${logical} (name resolved at deploy)`, r.Type);
   }
   for (const q of parsed.liftQueues) {
     add('sqs', q.queueName, noRunDetail(!!opts.noRun, q.fifo ? 'FIFO lift queue + DLQ + worker' : 'lift queue + DLQ + worker'));
+    add('sqs', liftDlqName(q.queueName, !!q.fifo), 'lift dead-letter queue');
     if (q.worker.handler || q.worker.image) add('lambda', `${parsed.service}-${parsed.stage}-${q.name}Worker`, 'lift worker');
   }
   for (const fn of parsed.functions) {
-    add('lambda', fn.deployedName, [fn.runtime, fn.handler || (fn.image ? 'image' : ''), `${fn.events.length} event(s)`].filter(Boolean).join(' · '));
-    for (const ev of fn.events) {
-      if (ev.http) add('apigateway', `${parsed.service}-${parsed.stage}`, `${ev.http.method.toUpperCase()} ${ev.http.path}`);
-      if (ev.httpApi) add('apigatewayv2', `${parsed.service}-${parsed.stage}-http`, `${ev.httpApi.method.toUpperCase()} ${ev.httpApi.path}`);
-      if (ev.schedule) {
-        const rate = typeof ev.schedule === 'string' ? ev.schedule : ev.schedule.rate;
-        add('event-rule', `${fn.deployedName}-schedule`, noRunDetail(!!opts.noRun, rate));
-      }
-      if (ev.sqs) add('event-source-mapping', `${fn.deployedName} ← ${typeof ev.sqs.arn === 'string' ? ev.sqs.arn : JSON.stringify(ev.sqs.arn)}`, noRunDetail(!!opts.noRun, 'SQS trigger'));
-      if (ev.s3) add('s3', ev.s3.bucket, opts.noRun ? `${ev.s3.event} · notification skipped (--no-run)` : ev.s3.event);
-      if (ev.eventBridge) add('event-rule', `${fn.deployedName}-eb`, noRunDetail(!!opts.noRun, 'EventBridge'));
-      if (ev.sns) add('sns', String(ev.sns), 'SNS trigger (best-effort)');
-      if (ev.other) parsed.unsupported.push(`event type "${ev.other}" on ${fn.name} is not created`);
-      if (ev.http?.authorizer || ev.httpApi?.authorizer) parsed.unsupported.push(`authorizer on ${fn.name} is not attached`);
+    const bad = invalidLambdaName(fn.deployedName);
+    if (bad) {
+      warnings.push(bad);
+      continue;
     }
-    if (fn.image) parsed.unsupported.push(`${fn.name} uses a container image — provide a local image or skip`);
+    add('lambda', fn.deployedName, [fn.runtime, fn.handler || (fn.image ? 'image' : ''), `${fn.events.length} event(s)`].filter(Boolean).join(' · '));
+    let sched = 0;
+    let eb = 0;
+    for (const ev of fn.events) {
+      if (ev.http) add('apigateway', `${parsed.service}-${parsed.stage}`, `${restMethod(ev.http.method)} ${ev.http.path}`);
+      if (ev.httpApi) add('apigatewayv2', `${parsed.service}-${parsed.stage}-http`, httpRouteKey(ev.httpApi.method, ev.httpApi.path));
+      if (ev.schedule) {
+        if (!ev.schedule.rates.length) warnings.push(`${fn.name}: schedule event without a rate is skipped`);
+        for (const rate of ev.schedule.rates) {
+          const off = !!opts.noRun || !ev.schedule.enabled;
+          add('event-rule', scheduleRuleName(fn.deployedName, sched++), [rate, off ? `DISABLED${opts.noRun ? ' (--no-run)' : ' (enabled: false)'}` : ''].filter(Boolean).join(' · '));
+        }
+      }
+      if (ev.sqs) add('event-source-mapping', `${fn.deployedName} ← ${showArn(ev.sqs.arn)}`, noRunDetail(!!opts.noRun, 'SQS trigger'));
+      if (ev.s3) add('s3', ev.s3.bucket, opts.noRun ? `${ev.s3.event} · notification skipped (--no-run)` : ev.s3.event);
+      const bus = ev.eventBridge ? busName(ev.eventBridge) : 'default';
+      if (bus !== 'default' && !buses.has(bus)) {
+        buses.add(bus);
+        add('event-bus', bus, 'custom event bus (created if missing)');
+      }
+      if (ev.eventBridge) add('event-rule', eventBridgeRuleName(fn.deployedName, eb++), noRunDetail(!!opts.noRun, `EventBridge${busName(ev.eventBridge) !== 'default' ? ` on bus ${busName(ev.eventBridge)}` : ''}`));
+      if (ev.sns) {
+        const topic = ev.sns.topicName ?? (typeof ev.sns.arn === 'string' ? ev.sns.arn : refTarget(ev.sns.arn));
+        add('sns', topic ?? 'unknown topic', opts.noRun ? 'topic only · subscription skipped (--no-run)' : 'topic + Lambda subscription');
+      }
+      if (ev.other) unsupported.push(`event type "${ev.other}" on ${fn.name} is not created`);
+      if (ev.http?.authorizer || ev.httpApi?.authorizer) unsupported.push(`authorizer on ${fn.name} is not attached`);
+    }
+    if (fn.image) unsupported.push(`${fn.name} uses a container image — provide a local image or skip`);
   }
-  for (const sm of parsed.stepFunctions) add('sfn', sm.name);
+  for (const sm of parsed.stepFunctions) {
+    if (sm.name.length > LIMITS.sfn) {
+      warnings.push(`state machine name ${sm.name} is ${sm.name.length} chars (limit ${LIMITS.sfn}); skipped`);
+      continue;
+    }
+    add('sfn', sm.name);
+  }
 
   return {
     kind: 'serverless',
@@ -320,9 +469,36 @@ export function planServerless(parsed: ParsedServerless, opts: { noRun?: boolean
     region: parsed.region,
     resources,
     placeholders: collectSecrets(parsed.ctx).map((s) => ({ name: s.name, keys: s.keys, defaulted: s.defaulted })),
-    warnings: parsed.warnings,
-    unsupported: parsed.unsupported,
+    warnings,
+    unsupported,
   };
+}
+
+function refTarget(v: unknown): string | undefined {
+  const o = asRecord(v);
+  if (typeof o.Ref === 'string') return o.Ref;
+  const g = o['Fn::GetAtt'];
+  if (Array.isArray(g)) return String(g[0]);
+  if (typeof g === 'string') return g.split('.')[0];
+  return undefined;
+}
+
+export function busName(eb: Record<string, unknown>): string {
+  const raw = asString(eb.eventBus) || asString(eb.eventBusName) || 'default';
+  return raw.startsWith('arn:') ? raw.split('/').pop() || 'default' : raw;
+}
+
+/** Serverless `method: '*'` / `any` → API Gateway ANY. */
+export function restMethod(method: string): string {
+  const m = method.toUpperCase();
+  return m === '*' ? 'ANY' : m;
+}
+
+/** HTTP API route key; Serverless `httpApi: '*'` is the catch-all $default route. */
+export function httpRouteKey(method: string, routePath: string): string {
+  const m = method.toUpperCase();
+  if (m === '*' && (routePath === '/' || routePath === '*' || !routePath)) return '$default';
+  return `${m === '*' ? 'ANY' : m} ${routePath.startsWith('/') ? routePath : `/${routePath}`}`;
 }
 
 function cfnKind(type: string): ResourceKind | undefined {
@@ -337,4 +513,4 @@ function cfnKind(type: string): ResourceKind | undefined {
   }
 }
 
-export { asRecord, asString, strEnv, type SecretBag };
+export { asRecord, asString, strEnv };

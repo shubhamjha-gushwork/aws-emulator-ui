@@ -7,6 +7,7 @@ export type ResourceKind =
   | 'secret'
   | 'log-group'
   | 'event-rule'
+  | 'event-bus'
   | 'scheduler'
   | 'event-source-mapping'
   | 'apigateway'
@@ -36,6 +37,8 @@ export interface DeployOptions {
   envFile?: string;
   /** Create resources but do not start work: disabled triggers, ECS desiredCount 0. */
   noRun?: boolean;
+  /** --region was passed explicitly: it overrides provider.region / the trinity file's region. */
+  regionFromFlag?: boolean;
 }
 
 export interface PlannedResource {
@@ -102,6 +105,7 @@ export function uiHref(kind: ResourceKind, name?: string): string {
     secret: '/secrets',
     'log-group': name ? `/logs/${encodeURIComponent(name)}` : '/logs',
     'event-rule': '/eventbridge',
+    'event-bus': '/eventbridge',
     scheduler: '/eventbridge',
     'event-source-mapping': '/lambda',
     apigateway: '/apigateway',

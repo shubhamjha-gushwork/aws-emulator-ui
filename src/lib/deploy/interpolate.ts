@@ -47,6 +47,14 @@ export interface InterpCtx {
   constructs: Record<string, Record<string, string>>;
   warnings: string[];
   visiting: Set<string>;
+  /** Inside a CloudFormation Fn::Sub string. */
+  inSub?: boolean;
+  /** Variable paths currently being resolved; a repeat means a circular reference. */
+  resolving: Set<string>;
+  /** Paths found to be circular; left unresolved from then on. */
+  circular: Set<string>;
+  /** Nesting depth guard for re-interpolation. */
+  depth: number;
 }
 
 export function createCtx(opts: {
@@ -71,6 +79,9 @@ export function createCtx(opts: {
     constructs: {},
     warnings: [],
     visiting: new Set(),
+    resolving: new Set(),
+    circular: new Set(),
+    depth: 0,
   };
 }
 
@@ -87,10 +98,30 @@ function walk(value: unknown, ctx: InterpCtx): unknown {
   }
   if (value && typeof value === 'object' && !(value instanceof SecretBag)) {
     const obj = value as Record<string, unknown>;
-    for (const k of Object.keys(obj)) obj[k] = walk(obj[k], ctx);
+    for (const k of Object.keys(obj)) {
+      // CloudFormation Fn::Sub owns ${Name} / ${AWS::Region}; only resolve Serverless sources inside it.
+      obj[k] = k === 'Fn::Sub' ? walkSub(obj[k], ctx) : walk(obj[k], ctx);
+    }
     return obj;
   }
   return value;
+}
+
+function walkSub(value: unknown, ctx: InterpCtx): unknown {
+  const prev = ctx.inSub;
+  ctx.inSub = true;
+  try {
+    return walk(value, ctx);
+  } finally {
+    ctx.inSub = prev;
+  }
+}
+
+/** True for ${...} bodies that belong to CloudFormation, not Serverless (e.g. AWS::Region, Logical.Arn inside Fn::Sub). */
+function isCfnExpression(expr: string, ctx: InterpCtx): boolean {
+  if (/^AWS::[A-Za-z]+$/.test(expr.trim())) return true;
+  if (expr.startsWith('!')) return true;
+  return Boolean(ctx.inSub) && /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)?$/.test(expr.trim());
 }
 
 /**
@@ -100,6 +131,23 @@ function walk(value: unknown, ctx: InterpCtx): unknown {
  */
 export function interpolateString(input: string, ctx: InterpCtx): unknown {
   if (!input.includes('${')) return input;
+  if (ctx.depth > 40) {
+    addWarning(ctx, `variable nesting too deep in "${input.slice(0, 60)}"; left unresolved`);
+    return input;
+  }
+  ctx.depth++;
+  try {
+    return interpolateOnce(input, ctx);
+  } finally {
+    ctx.depth--;
+  }
+}
+
+function addWarning(ctx: InterpCtx, w: string) {
+  if (!ctx.warnings.includes(w)) ctx.warnings.push(w);
+}
+
+function interpolateOnce(input: string, ctx: InterpCtx): unknown {
   const spans = findExpressions(input);
   if (spans.length === 1 && spans[0].start === 0 && spans[0].end === input.length) {
     return resolveExpr(spans[0].body, ctx);
@@ -120,6 +168,7 @@ export function interpolateString(input: string, ctx: InterpCtx): unknown {
 
 function stringify(v: unknown): string {
   if (v === MISSING_SECRET || v instanceof SecretBag) return PLACEHOLDER;
+  if (v === undefined || v === null) return '';
   if (typeof v === 'object') return JSON.stringify(v);
   return String(v);
 }
@@ -174,12 +223,30 @@ function unquote(s: string): string {
   return s;
 }
 
+class CircularReference extends Error {}
+
 function resolveExpr(expr: string, ctx: InterpCtx): unknown {
+  if (isCfnExpression(expr, ctx)) return `\${${expr}}`;
   const { path: rawPath, def } = splitDefault(expr);
   // Nested expressions inside the path (e.g. self:custom.x.${self:custom.stage})
-  const pathStr = typeof interpolateString(rawPath, ctx) === 'string' ? (interpolateString(rawPath, ctx) as string) : rawPath;
+  const interpolatedPath = interpolateString(rawPath, ctx);
+  const pathStr = typeof interpolatedPath === 'string' ? interpolatedPath : rawPath;
+  if (ctx.circular.has(pathStr)) return def !== undefined ? maybeInterpDefault(def, ctx) : `\${${expr}}`;
   try {
-    const v = resolvePath(pathStr, ctx);
+    let v = resolvePath(pathStr, ctx);
+    // A referenced value may itself contain variables that have not been walked yet (forward reference).
+    if (typeof v === 'string' && v.includes('${')) {
+      if (ctx.resolving.has(pathStr)) {
+        ctx.circular.add(pathStr);
+        throw new CircularReference(`circular reference via \${${pathStr}}`);
+      }
+      ctx.resolving.add(pathStr);
+      try {
+        v = interpolateString(v, ctx);
+      } finally {
+        ctx.resolving.delete(pathStr);
+      }
+    }
     // A missing secret key is unset: YAML defaults must win. Placeholders only when there is no default.
     if (v === MISSING_SECRET || v === PLACEHOLDER || v === PLACEHOLDER_VALUE) {
       if (def !== undefined) {
@@ -191,16 +258,21 @@ function resolveExpr(expr: string, ctx: InterpCtx): unknown {
     }
     if (v === undefined || v === null || v === '') {
       if (def !== undefined) return maybeInterpDefault(def, ctx);
-      if (kindOf(pathStr) === 'env') {
-        ctx.warnings.push(`\${env:${pathStr.slice(4)}} is unset; using a placeholder`);
+      const kind = kindOf(pathStr);
+      if (kind === 'env') {
+        addWarning(ctx, `\${env:${pathStr.slice(4)}} is unset; using a placeholder`);
         return PLACEHOLDER;
+      }
+      if (v !== '' && (kind === 'self' || kind === 'opt' || kind === 'sls' || kind === 'cf' || kind === 's3' || kind === 'param')) {
+        addWarning(ctx, `\${${pathStr}} could not be resolved (no value and no default)`);
       }
       return v;
     }
     return v;
   } catch (e) {
-    if (def !== undefined) return maybeInterpDefault(def, ctx);
-    ctx.warnings.push(`unresolved \${${expr}}: ${(e as Error).message}`);
+    if (def !== undefined && !(e instanceof CircularReference)) return maybeInterpDefault(def, ctx);
+    addWarning(ctx, `unresolved \${${expr}}: ${(e as Error).message}`);
+    if (e instanceof CircularReference && def !== undefined) return maybeInterpDefault(def, ctx);
     return `\${${expr}}`;
   }
 }
@@ -247,7 +319,11 @@ function resolvePath(p: string, ctx: InterpCtx): unknown {
     const [name, attr] = rest.split('.');
     return ctx.constructs[name]?.[attr] ?? `__CONSTRUCT__:${rest}`;
   }
-  if (kind === 'sls') return undefined;
+  if (kind === 'sls') {
+    if (rest === 'stage') return ctx.stage;
+    if (rest === 'instanceId') return 'local';
+    return undefined;
+  }
   // Trinity (and some serverless) paths are bare: custom.stage, environment.refs.X
   return getPath(ctx.root, p);
 }
@@ -366,7 +442,8 @@ function secretBagFromRefString(raw: string, ctx: InterpCtx): SecretBag | undefi
   if (!s || s.startsWith('${')) return undefined;
   let leaf: string | undefined;
   const arn = s.match(/^arn:aws:secretsmanager:[^:]+:[^:]+:secret:(.+)$/i);
-  if (arn) leaf = arn[1];
+  // Full Secrets Manager ARNs end in -XXXXXX (6 random chars) that is not part of the secret name.
+  if (arn) leaf = arn[1].replace(/-[A-Za-z0-9]{6}$/, '');
   else if (/\/aws\/reference\/secretsmanager\//i.test(s)) {
     leaf = s.replace(/^.*\/aws\/reference\/secretsmanager\//i, '');
   } else {

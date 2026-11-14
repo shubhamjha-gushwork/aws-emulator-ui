@@ -105,7 +105,9 @@ async function zipPython(parsed: ParsedServerless, fn: SlsFunction, zipPath: str
   // Best-effort: zip source excluding heavy dirs. Dependencies (requirements) are not installed
   // unless a .requirements or existing site-packages is clearly project-local — we skip that to
   // avoid pulling secrets or huge trees.
-  const files = selectPackageFiles(parsed.root, parsed.packagePatterns);
+  // Function-level package.patterns apply on top of the service-level ones (as with package.individually).
+  const svc = parsed.packagePatterns ?? {};
+  const files = selectPackageFiles(parsed.root, { ...svc, patterns: [...(svc.patterns ?? []), ...(fn.packagePatterns ?? [])] });
   zipFiles(parsed.root, zipPath, files);
   const size = fs.statSync(zipPath).size;
   if (size > 50 * 1024 * 1024) {
@@ -175,13 +177,19 @@ function listSource(root: string, patterns?: string[]): string[] {
   return filtered.slice(0, 4000);
 }
 
-/** Serverless-style package.patterns: if any include exists, only those files are packed; bangs exclude. */
+/**
+ * Serverless-style package.patterns, applied in order: the last pattern that matches decides
+ * (`!` excludes, plain re-includes), so the common `'!**'` then `'**\/*.py'` idiom works.
+ * Files no pattern matches are packed only when there are no include patterns at all, which keeps
+ * zips to the listed source instead of the whole repo.
+ */
 export function matchesPackagePatterns(file: string, patterns: string[]): boolean {
-  const includes = patterns.filter((p) => !p.startsWith('!'));
-  const excludes = patterns.filter((p) => p.startsWith('!'));
-  if (includes.length && !includes.some((p) => globMatch(file, p))) return false;
-  if (excludes.some((p) => globMatch(file, p))) return false;
-  return true;
+  let decision: boolean | undefined;
+  for (const p of patterns) {
+    if (globMatch(file, p)) decision = !p.startsWith('!');
+  }
+  if (decision !== undefined) return decision;
+  return !patterns.some((p) => !p.startsWith('!'));
 }
 
 export function globMatch(file: string, pattern: string): boolean {
@@ -197,7 +205,10 @@ export function globMatch(file: string, pattern: string): boolean {
 function globToRegExp(pat: string): RegExp {
   let out = '^';
   for (let i = 0; i < pat.length; ) {
-    if (pat[i] === '*' && pat[i + 1] === '*') {
+    if (pat[i] === '*' && pat[i + 1] === '*' && pat[i + 2] === '/') {
+      out += '(?:.*/)?'; // **/ also matches zero directories (**/*.py matches handler.py)
+      i += 3;
+    } else if (pat[i] === '*' && pat[i + 1] === '*') {
       out += '.*';
       i += 2;
     } else if (pat[i] === '*') {
