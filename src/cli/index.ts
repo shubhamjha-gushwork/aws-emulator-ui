@@ -3,6 +3,7 @@ import path from 'path';
 import { loadSettings } from '../lib/settings';
 import { deployAll, destroyById, inspectSecrets, listManifests, type DeployOptions } from '../lib/deploy';
 import type { Plan } from '../lib/deploy/types';
+import { matchDeployments } from '../lib/deploy/match';
 import { renderEnvExample } from '../lib/deploy/envfile';
 import fs from 'fs';
 
@@ -51,6 +52,13 @@ async function defaults(): Promise<Pick<DeployOptions, 'endpoint' | 'region' | '
   return { endpoint, region, stage: 'local' };
 }
 
+const VALUE_FLAGS = new Set(['stage', 'region', 'endpoint', 'desired-count', 'kind', 'env-file']);
+
+function fail(msg: string): never {
+  console.error(`✗ ${msg}`);
+  process.exit(2);
+}
+
 function parseArgs(argv: string[]) {
   const args = [...argv];
   const cmd = args.shift();
@@ -67,12 +75,19 @@ function parseArgs(argv: string[]) {
       if (peek && !peek.startsWith('--')) opts['write-example'] = args.shift()!;
       else opts['write-example'] = true;
     } else if (a.startsWith('--')) {
-      const key = a.slice(2);
-      const val = args.shift();
-      if (!val || val.startsWith('--')) usage(2);
+      const eq = a.indexOf('=');
+      const raw = eq > 0 ? a.slice(2, eq) : a.slice(2);
+      const key = raw === 'aws-emulator-env-file' ? 'env-file' : raw; // set by bin/aws-emulator
+      if (!VALUE_FLAGS.has(key)) fail(`unknown option ${a} (see aws-emulator --help)`);
+      const val = eq > 0 ? a.slice(eq + 1) : args.shift();
+      if (val === undefined || val === '' || val.startsWith('--')) fail(`--${key} needs a value`);
       opts[key] = val;
     } else positional.push(a);
   }
+  if (opts.kind !== undefined && opts.kind !== 'serverless' && opts.kind !== 'trinity') fail(`--kind must be serverless or trinity (got ${opts.kind})`);
+  if (opts['desired-count'] !== undefined && !/^\d+$/.test(String(opts['desired-count']))) fail(`--desired-count must be a whole number (got ${opts['desired-count']})`);
+  if (opts.stage !== undefined && !/^[A-Za-z0-9-]+$/.test(String(opts.stage))) fail(`--stage may only contain letters, digits and hyphens (got ${opts.stage})`);
+  if (opts.region !== undefined && !/^[a-z]{2}(-[a-z]+)+-\d$/.test(String(opts.region))) fail(`--region does not look like an AWS region (got ${opts.region})`);
   return { cmd, positional, opts };
 }
 
@@ -110,6 +125,7 @@ async function main() {
     source: path.resolve(positional[0] || '.'),
     stage: String(opts.stage || base.stage),
     region: String(opts.region || base.region),
+    regionFromFlag: opts.region !== undefined,
     endpoint: String(opts.endpoint || base.endpoint),
     dryRun: Boolean(opts.dryRun) || cmd === 'plan',
     noBuild: Boolean(opts.noBuild),
@@ -126,7 +142,7 @@ async function main() {
       return;
     }
     for (const m of all) {
-      console.log(`${m.id}  ${m.kind}  ${m.service}/${m.stage}  ${m.resources.length} resources  updated ${m.updatedAt}`);
+      console.log(`${m.id}  ${m.kind}  ${m.service}/${m.stage}  ${m.region}  ${m.resources.length} resources  updated ${m.updatedAt}`);
     }
     return;
   }
@@ -192,11 +208,15 @@ async function main() {
     const target = positional[0];
     const o = common();
     endpointForErrors = o.endpoint;
-    // A path: destroy every recorded deploy whose source lives under it. An id: that deploy only.
-    const all = listManifests();
-    const abs = path.resolve(target);
-    const matches = all.filter((m) => m.id === target || m.source === abs || m.source.startsWith(abs + path.sep) || m.id.startsWith(target));
-    if (!matches.length) throw new Error(`no recorded deployment matches ${target} (see aws-emulator list)`);
+    const matches = matchDeployments(listManifests(), target, {
+      stage: typeof opts.stage === 'string' ? opts.stage : undefined,
+      region: typeof opts.region === 'string' ? opts.region : undefined,
+      kind: o.kind,
+    });
+    if (!matches.length) {
+      console.log(`Nothing recorded under ${target}${opts.stage ? ` for stage ${opts.stage}` : ''} — nothing to destroy.`);
+      return;
+    }
     for (const m of matches) {
       console.log(`Destroying ${m.id} …`);
       const r = await destroyById(o, m.id);
@@ -215,12 +235,17 @@ function friendlyError(e: unknown, endpoint?: string): string {
   const code = err?.code || err?.cause?.code || '';
   const msg = err?.message ?? String(e);
   if (['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EHOSTUNREACH', 'ETIMEDOUT'].includes(code) || /ECONNREFUSED|ENOTFOUND|socket hang up/.test(msg)) {
-    return `Floci is not answering at ${endpoint ?? 'the endpoint'} (${code || msg}). Start it with scripts/start-local.sh, or pass --endpoint.`;
+    const hint = msg.match(/ — \d+ resource\(s\) created before the failure.*$/)?.[0] ?? '';
+    return `Floci is not answering at ${endpoint ?? 'the endpoint'} (${code || msg.split(' — ')[0]}). Start it with scripts/start-local.sh, or pass --endpoint.${hint}`;
   }
   return msg;
 }
 
 let endpointForErrors: string | undefined;
+process.on('SIGINT', () => {
+  console.error('\n✗ interrupted — anything created so far is recorded; rerun deploy to finish, or destroy to clean up.');
+  process.exit(130);
+});
 main().catch((e) => {
   console.error(`✗ ${friendlyError(e, endpointForErrors)}`);
   process.exit(1);

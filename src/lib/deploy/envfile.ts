@@ -13,29 +13,85 @@ export function mask(value?: string): string {
 }
 
 /**
- * Parse a dotenv-style file: KEY=VALUE, optional `export `, comments, quotes.
+ * Parse a dotenv-style file: KEY=VALUE, optional `export `, comments, single/double/backtick quotes,
+ * quoted values spanning several lines (e.g. PEM keys), and `# comments` after a value.
  * Does not interpolate $(...) or ${VAR} inside values (avoids surprise expansion).
  */
 export function parseEnvContent(content: string): EnvMap {
   const out: EnvMap = {};
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const body = line.startsWith('export ') ? line.slice(7).trim() : line;
-    const eq = body.indexOf('=');
-    if (eq <= 0) continue;
-    const key = body.slice(0, eq).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
-    let value = body.slice(eq + 1).trim();
-    if ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"'))) {
-      const q = value[0];
-      value = value.slice(1, -1);
-      if (q === '"') value = value.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-    } else {
-      const hash = value.indexOf(' #');
-      if (hash >= 0) value = value.slice(0, hash).trim();
+  const text = content.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  let i = 0;
+  const n = text.length;
+  const skipLine = () => {
+    while (i < n && text[i] !== '\n') i++;
+    i++;
+  };
+  while (i < n) {
+    // leading whitespace
+    while (i < n && (text[i] === ' ' || text[i] === '\t')) i++;
+    if (i >= n) break;
+    if (text[i] === '\n') {
+      i++;
+      continue;
     }
-    out[key] = value;
+    if (text[i] === '#') {
+      skipLine();
+      continue;
+    }
+    let lineEnd = text.indexOf('\n', i);
+    if (lineEnd < 0) lineEnd = n;
+    let head = text.slice(i, lineEnd);
+    const exp = head.match(/^export[ \t]+/);
+    if (exp) {
+      i += exp[0].length;
+      head = head.slice(exp[0].length);
+    }
+    const eq = head.indexOf('=');
+    const key = eq > 0 ? head.slice(0, eq).trim() : '';
+    if (!key || !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(key)) {
+      skipLine();
+      continue;
+    }
+    i += eq + 1;
+    while (i < n && (text[i] === ' ' || text[i] === '\t')) i++;
+    const q = text[i];
+    if (q === '"' || q === "'" || q === '`') {
+      // Quoted: runs to the matching unescaped quote, possibly across lines.
+      let j = i + 1;
+      let raw = '';
+      let closed = false;
+      while (j < n) {
+        const c = text[j];
+        if (c === '\\' && q === '"' && j + 1 < n) {
+          raw += c + text[j + 1];
+          j += 2;
+          continue;
+        }
+        if (c === q) {
+          closed = true;
+          break;
+        }
+        raw += c;
+        j++;
+      }
+      if (!closed) {
+        // Unterminated quote: treat the rest of the line literally rather than swallowing the file.
+        out[key] = text.slice(i, lineEnd).trim();
+        i = lineEnd + 1;
+        continue;
+      }
+      out[key] = q === '"'
+        ? raw.replace(/\\(n|r|t|"|\\)/g, (_m, ch: string) => ({ n: '\n', r: '\r', t: '\t', '"': '"', '\\': '\\' })[ch] as string)
+        : raw;
+      i = j + 1;
+      skipLine(); // ignore anything after the closing quote (e.g. a comment)
+      continue;
+    }
+    let value = text.slice(i, lineEnd);
+    const hash = value.search(/[ \t]#/);
+    if (hash >= 0) value = value.slice(0, hash);
+    out[key] = value.trim();
+    i = lineEnd + 1;
   }
   return out;
 }

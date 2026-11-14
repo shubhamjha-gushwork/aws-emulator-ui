@@ -86,3 +86,16 @@ export function resourceTags(opts: { id: string; stage: string; kind: string; se
 export function tagList(tags: Record<string, string>): { Key: string; Value: string }[] {
   return Object.entries(tags).map(([Key, Value]) => ({ Key, Value }));
 }
+
+/** True when the endpoint itself is unreachable (Floci stopped, wrong port) rather than one call failing. */
+export function isConnectionError(err: unknown): boolean {
+  const e = err as { code?: string; name?: string; message?: string; cause?: { code?: string } };
+  const code = e?.code || e?.cause?.code || '';
+  if (['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EHOSTUNREACH', 'ETIMEDOUT', 'EPIPE'].includes(code)) return true;
+  return /ECONNREFUSED|ECONNRESET|ENOTFOUND|EHOSTUNREACH|socket hang up|TimeoutError/.test(`${e?.name ?? ''} ${e?.message ?? ''}`);
+}
+
+/** Per-resource failures become warnings, but an unreachable endpoint must abort the whole deploy. */
+export function rethrowIfDown(err: unknown): void {
+  if (isConnectionError(err)) throw err;
+}

@@ -15,8 +15,8 @@
     "sfn-deep": "tsx scripts/sfn-deep.ts",
     "logs-probe": "tsx scripts/logs-probe.ts",
     "ecr-push": "tsx scripts/ecr-push.ts",
-    "deploy:local": "tsx src/cli/index.ts deploy",
-    "deploy": "tsx src/cli/index.ts"
+    "deploy:local": "node -- bin/aws-emulator deploy",
+    "deploy": "node -- bin/aws-emulator"
   },
   "dependencies": {
     "@aws-sdk/client-api-gateway": "^3.1168.0",

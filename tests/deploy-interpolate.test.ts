@@ -54,7 +54,9 @@ describe('interpolate', () => {
 describe('detect + plan fixtures', () => {
   it('detects serverless-mini.yml and trinity-mini.yml', () => {
     const found = detectConfigs(fixtures);
-    expect(found.map((f) => f.kind).sort()).toEqual(['serverless', 'trinity']);
+    const rel = found.map((f) => `${f.kind}:${path.relative(fixtures, f.file)}`);
+    expect(rel).toContain(`serverless:${path.join('sample-api', 'serverless.yml')}`);
+    expect(rel).toContain(`trinity:${path.join('sample-web', 'trinity.yml')}`);
   });
 
   it('plans the sample serverless service', () => {

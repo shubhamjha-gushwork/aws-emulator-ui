@@ -1,15 +1,17 @@
-import { DeleteFunctionCommand } from '@aws-sdk/client-lambda';
+import { DeleteEventSourceMappingCommand, DeleteFunctionCommand, ListEventSourceMappingsCommand } from '@aws-sdk/client-lambda';
 import { DeleteQueueCommand } from '@aws-sdk/client-sqs';
 import { DeleteTopicCommand } from '@aws-sdk/client-sns';
 import { DeleteBucketCommand, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 import { DeleteTableCommand } from '@aws-sdk/client-dynamodb';
 import { DeleteSecretCommand } from '@aws-sdk/client-secrets-manager';
 import { DeleteLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
-import { DeleteRuleCommand, RemoveTargetsCommand, ListTargetsByRuleCommand } from '@aws-sdk/client-eventbridge';
+import { DeleteEventBusCommand, DeleteRuleCommand, RemoveTargetsCommand, ListTargetsByRuleCommand } from '@aws-sdk/client-eventbridge';
 import { DeleteRestApiCommand } from '@aws-sdk/client-api-gateway';
 import { DeleteApiCommand } from '@aws-sdk/client-apigatewayv2';
 import { DeleteStateMachineCommand } from '@aws-sdk/client-sfn';
-import { DeleteClusterCommand, DeleteServiceCommand, UpdateServiceCommand, ListTasksCommand, ListServicesCommand, StopTaskCommand } from '@aws-sdk/client-ecs';
+import {
+  DeleteClusterCommand, DeleteServiceCommand, DeregisterTaskDefinitionCommand, ListTaskDefinitionsCommand, UpdateServiceCommand, ListTasksCommand, ListServicesCommand, StopTaskCommand,
+} from '@aws-sdk/client-ecs';
 import { DeleteRepositoryCommand } from '@aws-sdk/client-ecr';
 import { DeleteLoadBalancerCommand, DeleteTargetGroupCommand, DeleteListenerCommand, DescribeListenersCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
 import type { DeployClients } from './client';
@@ -18,16 +20,31 @@ import { deleteManifest, readManifest, writeManifest } from './state';
 import type { DeployManifest, DeployOptions, ManifestResource } from './types';
 
 export async function destroyManifest(clients: DeployClients, manifest: DeployManifest): Promise<{ ok: string[]; failed: { name: string; error: string }[] }> {
+  return destroyResources(clients, manifest.resources);
+}
+
+/** Identity of a manifest entry; used to dedupe and to find resources a redeploy no longer creates. */
+export function resourceKey(r: ManifestResource): string {
+  return `${r.kind}:${r.name}${r.kind === 'event-source-mapping' ? `:${r.arn ?? ''}` : ''}${r.extra?.bus ? `@${r.extra.bus}` : ''}`;
+}
+
+export function dedupeResources(list: ManifestResource[]): ManifestResource[] {
+  const seen = new Map<string, ManifestResource>();
+  for (const r of list) seen.set(resourceKey(r), r);
+  return [...seen.values()];
+}
+
+export async function destroyResources(clients: DeployClients, all: ManifestResource[]): Promise<{ ok: string[]; failed: { name: string; error: string }[] }> {
   const ok: string[] = [];
   const failed: { name: string; error: string }[] = [];
   const order: ManifestResource['kind'][] = [
-    'listener', 'ecs-service', 'scheduler', 'event-rule', 'event-source-mapping',
+    'listener', 'ecs-service', 'scheduler', 'event-rule', 'event-bus', 'event-source-mapping',
     'alb', 'target-group', 'lambda', 'sfn', 'apigateway', 'apigatewayv2',
     'ecs-task-definition', 'ecs-cluster', 'ecr', 'sqs', 'sns', 'dynamodb', 's3', 'secret', 'log-group', 'other',
   ];
   const rank = (k: string) => { const i = order.indexOf(k as ManifestResource['kind']); return i < 0 ? 99 : i; };
-  const resources = [...manifest.resources].sort((a, b) => rank(a.kind) - rank(b.kind));
-  const fallbackCluster = manifest.resources.find((r) => r.kind === 'ecs-cluster')?.name;
+  const resources = dedupeResources(all).sort((a, b) => rank(a.kind) - rank(b.kind));
+  const fallbackCluster = all.find((r) => r.kind === 'ecs-cluster')?.name;
   for (const r of resources) {
     try {
       await destroyOne(clients, r, fallbackCluster);
@@ -42,9 +59,36 @@ export async function destroyManifest(clients: DeployClients, manifest: DeployMa
 
 async function destroyOne(c: DeployClients, r: ManifestResource, fallbackCluster?: string) {
   switch (r.kind) {
-    case 'lambda':
+    case 'lambda': {
+      // Floci keeps a function's SQS mappings after the function is deleted; remove them first.
+      const maps = await c.lambda.send(new ListEventSourceMappingsCommand({ FunctionName: r.name })).catch(() => undefined);
+      for (const m of maps?.EventSourceMappings ?? []) if (m.UUID) await c.lambda.send(new DeleteEventSourceMappingCommand({ UUID: m.UUID })).catch(() => undefined);
       await c.lambda.send(new DeleteFunctionCommand({ FunctionName: r.name }));
+      await c.logs.send(new DeleteLogGroupCommand({ logGroupName: `/aws/lambda/${r.name}` })).catch(() => undefined);
       break;
+    }
+    case 'event-source-mapping': {
+      const fn = r.extra?.function || r.name;
+      const maps = await c.lambda.send(new ListEventSourceMappingsCommand({ FunctionName: fn, EventSourceArn: r.arn })).catch(() => undefined);
+      for (const m of maps?.EventSourceMappings ?? []) if (m.UUID) await c.lambda.send(new DeleteEventSourceMappingCommand({ UUID: m.UUID }));
+      break;
+    }
+    case 'event-bus':
+      if (r.name !== 'default') await c.events.send(new DeleteEventBusCommand({ Name: r.name }));
+      break;
+    case 'ecs-task-definition': {
+      const family = r.name;
+      let token: string | undefined;
+      do {
+        const listed = await c.ecs.send(new ListTaskDefinitionsCommand({ familyPrefix: family, status: 'ACTIVE', nextToken: token }));
+        for (const arn of listed.taskDefinitionArns ?? []) {
+          // familyPrefix is a prefix match; only deregister this exact family.
+          if (arn.split('/').pop()?.replace(/:\d+$/, '') === family) await c.ecs.send(new DeregisterTaskDefinitionCommand({ taskDefinition: arn }));
+        }
+        token = listed.nextToken;
+      } while (token);
+      break;
+    }
     case 'sqs':
       if (r.url) await c.sqs.send(new DeleteQueueCommand({ QueueUrl: r.url }));
       break;
@@ -74,9 +118,10 @@ async function destroyOne(c: DeployClients, r: ManifestResource, fallbackCluster
       break;
     case 'event-rule':
     case 'scheduler': {
-      const targets = await c.events.send(new ListTargetsByRuleCommand({ Rule: r.name })).catch(() => undefined);
-      if (targets?.Targets?.length) await c.events.send(new RemoveTargetsCommand({ Rule: r.name, Ids: targets.Targets.map((t) => t.Id!) }));
-      await c.events.send(new DeleteRuleCommand({ Name: r.name, Force: true }));
+      const bus = r.extra?.bus;
+      const targets = await c.events.send(new ListTargetsByRuleCommand({ Rule: r.name, EventBusName: bus })).catch(() => undefined);
+      if (targets?.Targets?.length) await c.events.send(new RemoveTargetsCommand({ Rule: r.name, EventBusName: bus, Ids: targets.Targets.map((t) => t.Id!) }));
+      await c.events.send(new DeleteRuleCommand({ Name: r.name, EventBusName: bus, Force: true }));
       break;
     }
     case 'apigateway':
@@ -156,7 +201,8 @@ async function drainCluster(c: DeployClients, cluster: string) {
 export async function destroyById(opts: Pick<DeployOptions, 'endpoint' | 'region'>, id: string) {
   const manifest = readManifest(id);
   if (!manifest) throw new Error(`no deployment named ${id}`);
-  const clients = makeClients(opts);
+  // Resources live in the region they were deployed to, whatever the current default is.
+  const clients = makeClients({ endpoint: opts.endpoint, region: manifest.region || opts.region });
   const result = await destroyManifest(clients, manifest);
   if (!result.failed.length) deleteManifest(id);
   else writeManifest({ ...manifest, updatedAt: new Date().toISOString(), warnings: [...manifest.warnings, ...result.failed.map((f) => `destroy ${f.name}: ${f.error}`)] });

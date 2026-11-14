@@ -47,7 +47,10 @@ function walk(dir: string, out: string[], depth: number, max: number) {
     if (e.name.startsWith('.') && e.name !== '.') continue;
     if (SKIP.has(e.name)) continue;
     const p = path.join(dir, e.name);
+    const isConfigName = NAMES.has(e.name) || e.name.endsWith('.trinity.yml') || e.name.endsWith('.trinity.yaml');
     if (e.isDirectory()) walk(p, out, depth + 1, max);
-    else if (e.isFile() && (NAMES.has(e.name) || e.name.endsWith('.trinity.yml') || e.name.endsWith('.trinity.yaml'))) out.push(p);
+    else if (e.isFile() && isConfigName) out.push(p);
+    // A symlinked config file (common in monorepos) counts; symlinked directories are not followed (no cycles).
+    else if (e.isSymbolicLink() && isConfigName && fs.statSync(p, { throwIfNoEntry: false })?.isFile()) out.push(p);
   }
 }

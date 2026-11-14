@@ -35,7 +35,13 @@ export function loadYaml(text: string, filename?: string): unknown {
     return load(text, { schema: SCHEMA }) ?? {};
   } catch (e) {
     if (filename && e instanceof Error && e.name === 'YAMLException') {
-      e.message = `invalid YAML in ${filename}: ${e.message}`;
+      // One line, no code snippet: "invalid YAML in serverless.yml (line 5, column 1): <reason>".
+      const ye = e as Error & { reason?: string; mark?: { line: number; column: number } };
+      const where = ye.mark ? ` (line ${ye.mark.line + 1}, column ${ye.mark.column + 1})` : '';
+      const reason = ye.reason || e.message.split('\n')[0];
+      e.message = /single document/.test(reason)
+        ? `invalid YAML in ${filename}: it contains several YAML documents (---); use one document per file`
+        : `invalid YAML in ${filename}${where}: ${reason}`;
     }
     throw e;
   }

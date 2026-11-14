@@ -98,7 +98,10 @@ npx aws-emulator plan /path/to/service
 
 npx aws-emulator list
 npx aws-emulator destroy /path/to/service          # or a deployment id from `list`
+npx aws-emulator destroy /path/to/service --stage qa --region eu-west-1   # only that stage/region
 ```
+
+Calling `bin/aws-emulator` through `node` directly? Use `node -- bin/aws-emulator …`. Without the `--`, Node 24 treats a later `--env-file` as its own flag and exits with `node: … not found`. The `npm run` scripts and the linked `aws-emulator` command already do this.
 
 ### Use the CLI from any folder
 
@@ -116,7 +119,15 @@ npm unlink -g aws-emulator                 # remove the global command
 
 Paths, `.env` lookup and `--env-file` are resolved from the folder you run it in; the endpoint and region come from the UI settings (default `http://127.0.0.1:4566`, `us-east-1`).
 
-Options: `--stage` (default `local`), `--region` (default `us-east-1` or the UI setting), `--endpoint`, `--dry-run`, `--no-build` (skip Docker build/push for Trinity), `--no-run` (create only: EventBridge/Scheduler rules are DISABLED, SQS/stream mappings are disabled, S3 notifications are skipped, ECS `desiredCount` is 0), `--desired-count N`, `--kind serverless|trinity`, `--env-file <path>`.
+Options: `--stage` (default `local`), `--region` (default `us-east-1` or the UI setting), `--endpoint`, `--dry-run`, `--no-build` (skip Docker build/push for Trinity), `--no-run` (create only: EventBridge/Scheduler rules are DISABLED, SQS/stream mappings are disabled, S3 notifications are skipped, ECS `desiredCount` is 0), `--desired-count N`, `--kind serverless|trinity`, `--env-file <path>`. `--key=value` also works. Unknown options, a missing value, a bad `--kind`, `--stage`, `--region` or `--desired-count` exit with code 2 before anything is created.
+
+**Region:** `--region` wins over `provider.region` / Trinity `region`, which wins over the UI setting. The region is part of the deployment record, so the same service can be deployed to two regions (or two stages) side by side; ids outside `us-east-1` get a `-<region>` suffix.
+
+**Redeploys, interrupts and destroy:**
+
+- A redeploy updates what exists and **prunes** resources the previous deploy recorded that the YAML no longer produces (removed functions, queues, rules, buses…). Pruning is skipped if the deploy reported failures, so nothing is removed on a half-broken run.
+- The deployment record is written as resources are created. If a deploy crashes, Floci goes down or you press Ctrl-C, whatever was already created is still recorded: rerun the deploy, or `destroy` it.
+- `destroy <path>` matches by the service's real path (a directory, file, symlink or `.` all match) and can be narrowed with `--stage`, `--region` and `--kind`. `destroy <id>` needs an exact id or a unique prefix. Destroying something that is already gone is a no-op. Lambda destroy also removes its event source mappings and `/aws/lambda/<name>` log group; Trinity destroy removes task definition revisions and log groups.
 
 ### Filling secrets from a local .env
 
@@ -147,7 +158,10 @@ A directory is scanned for `serverless.yml` / `serverless.yaml`, `trinity.yml` /
 - `${ssm:…}` and `${ssm(region):/aws/reference/secretsmanager/…}` are **not** fetched from AWS. The CLI creates a placeholder secret in Floci Secrets Manager (`aws-emulator/<stage>/…`) and prints the keys it saw so you can fill them in.
 - Functions (nodejs and python handlers). Node functions are bundled with esbuild when the project (or this repo) has it. Python is zipped from source; `serverless-python-requirements` / `serverless-uv-requirements` are not run, so third-party packages may be missing.
 - HTTP events → API Gateway REST; `httpApi` events → HTTP API. Authorizers, custom domains and `serverless-domain-manager` are skipped.
-- `schedule` → EventBridge rules; `sqs` → event source mappings; `s3` → bucket notifications; `eventBridge` → rules + targets.
+- `schedule` → EventBridge rules (one per event, `rate` lists, `input`, `enabled: false`); `sqs` → event source mappings; `s3` → bucket notifications; `sns` → topic + Lambda subscription; `eventBridge` → rules + targets, creating a custom `eventBus` if it is missing.
+- CloudFormation intrinsics in `resources` and in env vars: `Ref`, `Fn::GetAtt`, `Fn::Join`, `Fn::Sub`, `Fn::Select`, `Fn::Split`, plus pseudo parameters. Resources are created in dependency order, so a queue's `RedrivePolicy` can point at its DLQ.
+- `${sls:stage}`, forward references and `package.patterns` (service and function level, last match wins). Circular `${self:}` references and missing values without a default are reported as warnings instead of crashing.
+- Names over the AWS limit (Lambda 64, SQS 80) are reported and skipped; generated rule / ALB / target group names are shortened with a hash.
 - `resources.Resources` of type SQS, SNS, S3, DynamoDB, Secrets Manager, log groups. IAM, CloudWatch Alarms, metric filters, Bedrock AgentCore and other types are reported and skipped.
 - `serverless-lift` `queue` constructs → SQS (+ DLQ) and a worker Lambda. Other construct types and alarms are skipped.
 - `serverless-step-functions` state machines (definition inlined or via `${file(…)}`).
@@ -160,6 +174,7 @@ A directory is scanned for `serverless.yml` / `serverless.yaml`, `trinity.yml` /
 - `stacks.ScheduledFargate`: cluster, task definition, EventBridge schedule. If there is no Dockerfile, a slim Python image is generated from the task `handler`.
 - `${custom.stage}` and `${custom.${custom.stage}.…}` with a fallback to `custom.dev` when `custom.<stage>` is missing (so `--stage local` still picks up a `dev` block).
 - `${environment.refs…}` becomes placeholder secrets, same as SSM above.
+- `buildArgs` / `dockerBuildArgs` (map or `KEY=VALUE` list) are passed to `docker build`. A missing Dockerfile is reported before anything is created; stacks of unknown types without a Dockerfile are skipped.
 - Custom domains, ACM, Route 53, autoscaling and IAM statements are not created. Multi-region stacks deploy only the requested region.
 
 ### What is not supported / known limits
@@ -169,6 +184,11 @@ A directory is scanned for `serverless.yml` / `serverless.yaml`, `trinity.yml` /
 - `serverless-offline`, tracing, and prune plugins are ignored.
 - Placeholder secrets contain the literal value `PLACEHOLDER — set this value in Floci Secrets Manager` unless a local `--env-file` (or `.env.local` / `.env`) provides the same key names. Values from that file are written only to Floci Secrets Manager and to the function/task environment; they are never printed and never read from real AWS.
 - Idempotent re-deploy updates existing functions, queues, services and so on rather than failing. `destroy` removes what that deploy recorded (by id, tagged where the API accepts tags).
+- API routes removed from the YAML stay on the REST / HTTP API after a redeploy (the API itself is pruned when it is no longer used).
+- Layers, authorizers, `websocket`, `alb`, `stream`, `cloudwatchLog` and state-machine events are reported and not created.
+- A plain `${ssm:/param}` (not a Secrets Manager reference) is emulated as a Secrets Manager secret with a `VALUE` key.
+- Trinity resource names come from task names and the stage, so two repos with the same task names and stage collide. Container health checks and autoscaling are not created.
+- `destroy` deletes the Floci ECR repository but not the image in your local Docker cache.
 - Trinity Docker builds use the service directory as context; huge repos will be slow. Prefer `--no-build` once an image is already in Floci ECR.
 
 ## Requirements

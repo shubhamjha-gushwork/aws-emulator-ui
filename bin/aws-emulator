@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --
 // Launcher for the aws-emulator CLI. Works from any folder and through `npm link`
 // symlinks: every path is resolved relative to this package, never the cwd.
 'use strict';
@@ -18,7 +18,11 @@ const env = {
   // Share the UI's saved endpoint/region (<package>/.data/settings.json) regardless of cwd.
   AWS_EMULATOR_UI_DATA_DIR: process.env.AWS_EMULATOR_UI_DATA_DIR || path.join(root, '.data'),
 };
-const r = spawnSync(process.execPath, [tsxCli, path.join(root, 'src', 'cli', 'index.ts'), ...process.argv.slice(2)], { stdio: 'inherit', env });
+// Node scans the whole command line for its own --env-file flag (and exits if the file is missing),
+// even after the script name. The shebang's `--` stops that for this process; for the tsx child,
+// pass ours under an internal name the CLI maps back to --env-file.
+const args = process.argv.slice(2).map((a) => (a === '--env-file' ? '--aws-emulator-env-file' : a.startsWith('--env-file=') ? `--aws-emulator-env-file=${a.slice(11)}` : a));
+const r = spawnSync(process.execPath, [tsxCli, path.join(root, 'src', 'cli', 'index.ts'), ...args], { stdio: 'inherit', env });
 if (r.error) {
   console.error(`aws-emulator: ${r.error.message}`);
   process.exit(1);
