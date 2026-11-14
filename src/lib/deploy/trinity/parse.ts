@@ -4,6 +4,8 @@ import { collectSecrets, createCtx, interpolateTree, promoteSecretsManagerRefs, 
 import { loadYaml } from '../yaml';
 import { type Plan, type PlannedResource, type ResourceKind, uiHref } from '../types';
 import { noRunDetail, serviceDesiredCount } from '../run-mode';
+import { fitName, LIMITS } from '../cfn';
+import { fitFargateResources } from './fargate';
 
 export type TrinityStackKind = 'HTTPApi' | 'Fargate' | 'ScheduledFargate' | string;
 
@@ -27,6 +29,8 @@ export interface TrinityTask {
   clusterName?: string;
   regions?: string[];
   volumeSize?: number;
+  /** docker build --build-arg values (buildArgs / dockerBuildArgs as a map or KEY=VALUE list). Never printed. */
+  buildArgs?: Record<string, string>;
 }
 
 export interface ParsedTrinity {
@@ -70,7 +74,7 @@ function strEnv(v: unknown): Record<string, string> {
  * shapes observed in trinity.yml / *.trinity.yml files:
  *   name, account, region, environment.{refs,variables}, custom.{stage}, stacks.{HTTPApi|Fargate|ScheduledFargate}
  */
-export function parseTrinityFile(file: string, opts: { stage: string; region: string; accountId?: string; env?: NodeJS.Dict<string>; fileEnv?: NodeJS.Dict<string> }): ParsedTrinity {
+export function parseTrinityFile(file: string, opts: { stage: string; region: string; accountId?: string; env?: NodeJS.Dict<string>; fileEnv?: NodeJS.Dict<string>; regionFromFlag?: boolean }): ParsedTrinity {
   const raw = fs.readFileSync(file, 'utf8');
   const doc = rec(loadYaml(raw, file));
   const root = path.dirname(file);
@@ -92,7 +96,8 @@ export function parseTrinityFile(file: string, opts: { stage: string; region: st
   const warnings = [...ctx.warnings];
   const unsupported: string[] = [];
   const name = str(doc.name) || path.basename(root);
-  const region = str(doc.region) || opts.region;
+  // --region wins; otherwise the file's region, then the default.
+  const region = opts.regionFromFlag ? opts.region : str(doc.region) || opts.region;
   const envVars = strEnv(rec(doc.environment).variables);
 
   const stacks: ParsedTrinity['stacks'] = [];
@@ -112,8 +117,8 @@ export function parseTrinityFile(file: string, opts: { stage: string; region: st
         stacks.push({ kind, clusterName: str(it.clusterName) || `${str(it.name) || name}-${opts.stage}`, tasks: [taskFrom(it, { envVars, regions: arr(it.regions) })] });
       } else {
         unsupported.push(`stack type ${kind} is not supported`);
-        // still try to read a dockerfile/name if present
-        if (str(it.name) || str(it.dockerfile)) {
+        // Only an explicit Dockerfile is enough to run an unknown stack as a plain ECS service.
+        if (str(it.dockerfile)) {
           stacks.push({ kind, tasks: [taskFrom(it, { envVars, regions: arr(it.regions) })] });
         }
       }
@@ -150,35 +155,84 @@ function taskFrom(task: Record<string, unknown>, base: { envVars: Record<string,
     clusterName: str(task.clusterName) || base.clusterName,
     regions: arr(task.regions) ?? base.regions,
     volumeSize: num(task.volumeSize),
+    buildArgs: buildArgsFrom(task.buildArgs ?? task.dockerBuildArgs),
   };
 }
 
-export function planTrinity(parsed: ParsedTrinity, opts: { noRun?: boolean } = {}): Plan {
+function buildArgsFrom(v: unknown): Record<string, string> | undefined {
+  if (Array.isArray(v)) {
+    const out: Record<string, string> = {};
+    for (const item of v) {
+      const s = String(item);
+      const eq = s.indexOf('=');
+      if (eq > 0) out[s.slice(0, eq)] = s.slice(eq + 1);
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+  const m = strEnv(v);
+  return Object.keys(m).length ? m : undefined;
+}
+
+function slugName(s: string): string {
+  return s.replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+}
+
+/** Physical names apply creates for a task; shared with the plan so both always agree. */
+export function trinityNames(parsedName: string, stage: string, t: TrinityTask) {
+  const family = `${t.name}-${stage}`;
+  const base = slugName(`${t.name}-${stage}`);
+  return {
+    cluster: t.clusterName || `${parsedName}-${stage}`,
+    repo: `aws-emulator/${stage}/${t.name}`.toLowerCase(),
+    family,
+    logGroup: `/ecs/${family}`,
+    rule: fitName(`${family}-schedule`, LIMITS.rule),
+    alb: fitName(base, LIMITS.alb),
+    targetGroup: fitName(slugName(`${base}-tg`), LIMITS.targetGroup),
+    listener: `${fitName(base, LIMITS.alb)}:80`,
+  };
+}
+
+/** Container port: appPort, else 8080 for HTTP services (HTTPApi or a health check), else none. */
+export function trinityPort(stackKind: string, t: TrinityTask): number | undefined {
+  return t.appPort ?? (t.healthCheckPath || stackKind === 'HTTPApi' ? 8080 : undefined);
+}
+
+export function planTrinity(parsed: ParsedTrinity, opts: { noRun?: boolean; desiredCount?: number } = {}): Plan {
   const resources: PlannedResource[] = [];
   const add = (kind: ResourceKind, name: string, detail?: string) => {
     resources.push({ kind, name, action: 'create', detail, href: uiHref(kind, name) });
   };
   for (const s of collectSecrets(parsed.ctx)) add('secret', s.name, s.keys.length ? `keys: ${s.keys.join(', ')}` : 'placeholder');
+  const clusters = new Set<string>();
   for (const stack of parsed.stacks) {
     for (const t of stack.tasks) {
-      const cluster = t.clusterName || `${parsed.name}-${parsed.stage}`;
-      add('ecs-cluster', cluster, stack.kind);
-      add('ecr', `aws-emulator/${parsed.stage}/${t.name}`, t.dockerfile ? `build ${t.dockerfile}` : t.handler ? `generated image from ${t.handler}` : 'image');
-      add('ecs-task-definition', `${t.name}-${parsed.stage}`, `cpu ${t.cpu ?? 256} / mem ${t.memory ?? 512}`);
+      const n = trinityNames(parsed.name, parsed.stage, t);
+      if (!clusters.has(n.cluster)) {
+        clusters.add(n.cluster);
+        add('ecs-cluster', n.cluster, stack.kind);
+      }
+      add('ecr', n.repo, t.dockerfile ? `build ${t.dockerfile}${t.buildArgs ? ` (build args: ${Object.keys(t.buildArgs).join(', ')})` : ''}` : t.handler ? `generated image from ${t.handler}` : 'image');
+      const fitted = fitFargateResources(t.cpu ?? 256, t.memory ?? 512);
+      add('ecs-task-definition', n.family, `cpu ${fitted.cpu} / mem ${fitted.memory}${fitted.adjusted ? ` (adjusted from ${t.cpu ?? 256}/${t.memory ?? 512})` : ''}`);
+      add('log-group', n.logGroup);
       if (t.schedule) {
-        add('scheduler', `${t.name}-${parsed.stage}`, noRunDetail(!!opts.noRun, t.schedule));
+        add('scheduler', n.rule, noRunDetail(!!opts.noRun, t.schedule));
       } else {
-        add('ecs-service', t.name, `desiredCount ${serviceDesiredCount(!!opts.noRun, undefined, t.desiredCount)}`);
+        add('ecs-service', t.name, `desiredCount ${serviceDesiredCount(!!opts.noRun, opts.desiredCount, t.desiredCount)}`);
+        const port = trinityPort(stack.kind, t);
+        if (port) {
+          add('target-group', n.targetGroup, t.albHealthCheckPath || t.healthCheckPath || '/');
+          add('alb', n.alb, `container port ${port}`);
+          add('listener', n.listener);
+        }
       }
-      if (stack.kind === 'HTTPApi' || t.appPort) {
-        add('target-group', `${t.name}-tg`, t.albHealthCheckPath || t.healthCheckPath || '/');
-        add('alb', `${t.name}-alb`, `port ${t.appPort ?? 80}`);
-        add('listener', `${t.name}-listener`);
-      }
-      if (t.regions && t.regions.length > 1) parsed.unsupported.push(`${t.name}: multi-region (${t.regions.join(', ')}) — only ${parsed.region} is deployed`);
+      const multi = t.regions && t.regions.length > 1 ? `${t.name}: multi-region (${t.regions.join(', ')}) — only ${parsed.region} is deployed` : undefined;
+      if (multi && !parsed.unsupported.includes(multi)) parsed.unsupported.push(multi);
     }
   }
-  parsed.unsupported.push('custom domains, ACM, Route 53, and autoscaling are not created');
+  const note = 'custom domains, ACM, Route 53, and autoscaling are not created';
+  if (!parsed.unsupported.includes(note)) parsed.unsupported.push(note);
   return {
     kind: 'trinity',
     service: parsed.name,

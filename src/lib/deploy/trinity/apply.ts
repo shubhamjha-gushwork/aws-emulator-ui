@@ -8,7 +8,7 @@ import { CreateSecretCommand, DescribeSecretCommand, PutSecretValueCommand } fro
 import { CreateLogGroupCommand } from '@aws-sdk/client-cloudwatch-logs';
 import {
   CreateLoadBalancerCommand, CreateTargetGroupCommand, CreateListenerCommand,
-  DescribeLoadBalancersCommand, DescribeTargetGroupsCommand,
+  DescribeListenersCommand, DescribeLoadBalancersCommand, DescribeTargetGroupsCommand,
 } from '@aws-sdk/client-elastic-load-balancing-v2';
 import { DescribeVpcsCommand as DescribeEc2VpcsCommand, DescribeSubnetsCommand as DescribeEc2SubnetsCommand, EC2Client } from '@aws-sdk/client-ec2';
 import { PutRuleCommand, PutTargetsCommand } from '@aws-sdk/client-eventbridge';
@@ -17,7 +17,7 @@ import { resourceTags } from '../client';
 import { collectSecrets } from '../interpolate';
 import { buildSecretPayload, classifyKeys, fillPlaceholderEnv, type EnvMap } from '../envfile';
 import { uiHref, type DeployManifest, type ManifestResource, type Plan } from '../types';
-import { planTrinity, type ParsedTrinity, type TrinityTask } from './parse';
+import { planTrinity, trinityNames, trinityPort, type ParsedTrinity, type TrinityTask } from './parse';
 import { fitFargateResources } from './fargate';
 import { serviceDesiredCount, triggerState } from '../run-mode';
 
@@ -26,13 +26,25 @@ const ROLE = 'arn:aws:iam::000000000000:role/aws-emulator-ui-role';
 export async function applyTrinity(
   clients: DeployClients,
   parsed: ParsedTrinity,
-  opts: { dryRun: boolean; noBuild: boolean; desiredCount?: number; id: string; source: string; fileEnv?: EnvMap; noRun?: boolean },
+  opts: { dryRun: boolean; noBuild: boolean; desiredCount?: number; id: string; source: string; fileEnv?: EnvMap; noRun?: boolean; resources?: ManifestResource[] },
 ): Promise<{ plan: Plan; manifest?: DeployManifest }> {
-  const plan = planTrinity(parsed, { noRun: opts.noRun });
+  const plan = planTrinity(parsed, { noRun: opts.noRun, desiredCount: opts.desiredCount });
   if (opts.dryRun) return { plan };
 
+  // Fail before creating anything when a build input is missing, so nothing is left half-made.
+  if (!opts.noBuild) {
+    for (const stack of parsed.stacks) {
+      for (const task of stack.tasks) {
+        if (task.dockerfile && !fs.existsSync(path.resolve(parsed.root, task.dockerfile))) {
+          throw new Error(`${task.name}: Dockerfile not found at ${path.resolve(parsed.root, task.dockerfile)} (fix dockerfile: in ${path.basename(parsed.file)}, or pass --no-build to use an existing image)`);
+        }
+      }
+    }
+  }
+
   const tags = resourceTags({ id: opts.id, stage: parsed.stage, kind: 'trinity', service: parsed.name, source: opts.source });
-  const resources: ManifestResource[] = [];
+  const resources: ManifestResource[] = opts.resources ?? [];
+  const region = clients.region;
 
   const fileEnv = opts.fileEnv ?? {};
   const filledFromEnv: string[] = [];
@@ -51,24 +63,25 @@ export async function applyTrinity(
 
   for (const stack of parsed.stacks) {
     for (const task of stack.tasks) {
-      const cluster = task.clusterName || `${parsed.name}-${parsed.stage}`;
+      const n = trinityNames(parsed.name, parsed.stage, task);
+      const cluster = n.cluster;
       await clients.ecs.send(new CreateClusterCommand({ clusterName: cluster, tags: Object.entries(tags).map(([key, value]) => ({ key, value })) })).catch(() => undefined);
       resources.push({ kind: 'ecs-cluster', name: cluster, href: uiHref('ecs-cluster') });
 
-      const repo = `aws-emulator/${parsed.stage}/${task.name}`.toLowerCase();
-      const image = await ensureImage(clients, parsed, task, repo, opts.noBuild, plan);
-      resources.push({ kind: 'ecr', name: repo, href: uiHref('ecr') });
+      const repo = n.repo;
+      const image = await ensureImage(clients, parsed, task, repo, opts.noBuild, plan, () => resources.push({ kind: 'ecr', name: repo, href: uiHref('ecr') }));
 
-      const family = `${task.name}-${parsed.stage}`;
-      const logGroup = `/ecs/${family}`;
+      const family = n.family;
+      const logGroup = n.logGroup;
       await clients.logs.send(new CreateLogGroupCommand({ logGroupName: logGroup })).catch(() => undefined);
+      resources.push({ kind: 'log-group', name: logGroup, href: uiHref('log-group', logGroup) });
       const fitted = fitFargateResources(task.cpu ?? 256, task.memory ?? 512);
       if (fitted.adjusted) {
         plan.warnings.push(`${task.name}: Fargate cpu/memory ${task.cpu ?? 256}/${task.memory ?? 512} is not a valid pair; using ${fitted.cpu}/${fitted.memory}`);
       }
       const cpu = String(fitted.cpu);
       const memory = String(fitted.memory);
-      const port = task.appPort ?? (task.healthCheckPath || stack.kind === 'HTTPApi' ? 8080 : undefined);
+      const port = trinityPort(stack.kind, task);
       const command = task.handler && !task.dockerfile ? pythonCommand(task) : undefined;
       const td = await clients.ecs.send(new RegisterTaskDefinitionCommand({
         family,
@@ -91,7 +104,7 @@ export async function applyTrinity(
           portMappings: port ? [{ containerPort: port, protocol: 'tcp' }] : undefined,
           logConfiguration: {
             logDriver: 'awslogs',
-            options: { 'awslogs-group': logGroup, 'awslogs-region': parsed.region, 'awslogs-stream-prefix': task.name },
+            options: { 'awslogs-group': logGroup, 'awslogs-region': region, 'awslogs-stream-prefix': task.name },
           },
         }],
       }));
@@ -99,13 +112,14 @@ export async function applyTrinity(
       resources.push({ kind: 'ecs-task-definition', name: family, arn: tdArn, href: uiHref('ecs-task-definition') });
 
       if (task.schedule) {
-        const rule = `${family}-schedule`;
+        const rule = n.rule;
         await clients.events.send(new PutRuleCommand({ Name: rule, ScheduleExpression: task.schedule, State: triggerState(!!opts.noRun) }));
+        resources.push({ kind: 'scheduler', name: rule, href: uiHref('scheduler') });
         await clients.events.send(new PutTargetsCommand({
           Rule: rule,
           Targets: [{
             Id: 'ecs',
-            Arn: `arn:aws:ecs:${parsed.region}:000000000000:cluster/${cluster}`,
+            Arn: `arn:aws:ecs:${region}:000000000000:cluster/${cluster}`,
             RoleArn: ROLE,
             EcsParameters: {
               TaskDefinitionArn: tdArn,
@@ -115,19 +129,22 @@ export async function applyTrinity(
             },
           }],
         })).catch((e) => plan.warnings.push(`${task.name}: schedule target failed (${(e as Error).message})`));
-        resources.push({ kind: 'scheduler', name: rule, href: uiHref('scheduler') });
       } else {
         const desired = serviceDesiredCount(!!opts.noRun, opts.desiredCount, task.desiredCount);
         const serviceName = task.name;
         let loadBalancers: { targetGroupArn: string; containerName: string; containerPort: number }[] | undefined;
-        if ((stack.kind === 'HTTPApi' || port) && port && net.subnets.length) {
-          const alb = await upsertAlb(clients, `${slug(task.name)}-${parsed.stage}`, net, port, task.albHealthCheckPath || task.healthCheckPath || '/');
+        if (port && net.subnets.length) {
+          const alb = await upsertAlb(clients, n, net, port, task.albHealthCheckPath || task.healthCheckPath || '/');
           loadBalancers = [{ targetGroupArn: alb.tgArn, containerName: task.name, containerPort: port }];
           resources.push({ kind: 'alb', name: alb.lbName, arn: alb.lbArn, url: alb.dns, href: uiHref('alb') });
           resources.push({ kind: 'target-group', name: alb.tgName, arn: alb.tgArn, href: uiHref('target-group') });
+          if (alb.listenerArn) resources.push({ kind: 'listener', name: n.listener, arn: alb.listenerArn, href: uiHref('listener') });
+        } else if (port) {
+          plan.warnings.push(`${task.name}: no subnets found in ${region}; load balancer not created`);
         }
         const existing = await clients.ecs.send(new DescribeServicesCommand({ cluster, services: [serviceName] })).catch(() => undefined);
-        const present = existing?.services?.some((s) => s.serviceName === serviceName && s.status !== 'INACTIVE');
+        // Floci's DescribeServices matches by name across clusters and regions, so check the cluster ARN too.
+        const present = existing?.services?.some((s) => sameServiceHome(s, serviceName, cluster, region));
         if (present) {
           await clients.ecs.send(new UpdateServiceCommand({ cluster, service: serviceName, taskDefinition: tdArn, desiredCount: desired, forceNewDeployment: true }));
         } else {
@@ -158,7 +175,7 @@ export async function applyTrinity(
       kind: 'trinity',
       service: parsed.name,
       stage: parsed.stage,
-      region: parsed.region,
+      region,
       source: parsed.file,
       createdAt: now,
       updatedAt: now,
@@ -178,10 +195,11 @@ async function upsertSecret(c: DeployClients, name: string, value: string) {
   }
 }
 
-async function ensureImage(c: DeployClients, parsed: ParsedTrinity, task: TrinityTask, repo: string, noBuild: boolean, plan: Plan): Promise<string> {
+async function ensureImage(c: DeployClients, parsed: ParsedTrinity, task: TrinityTask, repo: string, noBuild: boolean, plan: Plan, onRepo: () => void): Promise<string> {
   await c.ecr.send(new CreateRepositoryCommand({ repositoryName: repo })).catch((e) => {
     if ((e as { name?: string }).name !== 'RepositoryAlreadyExistsException') throw e;
   });
+  onRepo();
   const desc = await c.ecr.send(new DescribeRepositoriesCommand({ repositoryNames: [repo] }));
   const uri = desc.repositories?.[0]?.repositoryUri;
   if (!uri) throw new Error(`no repositoryUri for ${repo}`);
@@ -197,8 +215,14 @@ async function ensureImage(c: DeployClients, parsed: ParsedTrinity, task: Trinit
     : path.join(contextDir, 'Dockerfile');
   const args = ['build', '-t', ref, '-f', dockerfile];
   if (task.dockerTarget) args.push('--target', task.dockerTarget);
+  // Values go to docker only, never to our output.
+  for (const [k, v] of Object.entries(task.buildArgs ?? {})) args.push('--build-arg', `${k}=${v}`);
   args.push(contextDir);
-  execFileSync('docker', args, { stdio: 'inherit' });
+  try {
+    execFileSync('docker', args, { stdio: 'inherit' });
+  } finally {
+    if (!task.dockerfile) fs.rmSync(contextDir, { recursive: true, force: true });
+  }
   await dockerLoginAsync(c, uri);
   execFileSync('docker', ['push', ref], { stdio: 'inherit' });
   return ref;
@@ -254,13 +278,13 @@ async function defaultNetwork(c: DeployClients): Promise<{ subnets: string[]; sg
 
 async function upsertAlb(
   c: DeployClients,
-  name: string,
+  names: { alb: string; targetGroup: string },
   net: { subnets: string[]; sgs: string[] },
   port: number,
   healthPath: string,
 ) {
-  const lbName = slug(name).slice(0, 32);
-  const tgName = slug(`${name}-tg`).slice(0, 32);
+  const lbName = names.alb;
+  const tgName = names.targetGroup;
   let lbArn: string | undefined;
   let dns: string | undefined;
   try {
@@ -294,18 +318,25 @@ async function upsertAlb(
     }));
     tgArn = created.TargetGroups?.[0]?.TargetGroupArn;
   }
+  let listenerArn: string | undefined;
   if (lbArn && tgArn) {
-    await c.elbv2.send(new CreateListenerCommand({
-      LoadBalancerArn: lbArn,
-      Protocol: 'HTTP',
-      Port: 80,
-      DefaultActions: [{ Type: 'forward', TargetGroupArn: tgArn }],
-    })).catch(() => undefined);
+    const existing = await c.elbv2.send(new DescribeListenersCommand({ LoadBalancerArn: lbArn })).catch(() => undefined);
+    listenerArn = existing?.Listeners?.find((l) => l.Port === 80)?.ListenerArn;
+    if (!listenerArn) {
+      const created = await c.elbv2.send(new CreateListenerCommand({
+        LoadBalancerArn: lbArn,
+        Protocol: 'HTTP',
+        Port: 80,
+        DefaultActions: [{ Type: 'forward', TargetGroupArn: tgArn }],
+      })).catch(() => undefined);
+      listenerArn = created?.Listeners?.[0]?.ListenerArn;
+    }
   }
-  return { lbName, lbArn, tgName, tgArn: tgArn || '', dns };
+  return { lbName, lbArn, tgName, tgArn: tgArn || '', dns, listenerArn };
 }
 
-function slug(s: string): string {
-  return s.replace(/[^a-zA-Z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+export function sameServiceHome(s: { serviceName?: string; status?: string; clusterArn?: string }, name: string, cluster: string, region: string): boolean {
+  if (s.serviceName !== name || s.status === 'INACTIVE') return false;
+  if (!s.clusterArn) return true;
+  return s.clusterArn.endsWith(`:cluster/${cluster}`) && s.clusterArn.includes(`:${region}:`);
 }
-

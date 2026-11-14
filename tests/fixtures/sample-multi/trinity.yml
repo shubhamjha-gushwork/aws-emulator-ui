@@ -1,0 +1,49 @@
+name: sample-trinity
+region: us-east-1
+environment:
+  refs:
+    appSecrets: ${ssm:/aws/reference/secretsmanager/${custom.stage}/sample-app-secrets}
+    globalSecrets: arn:aws:secretsmanager:us-east-1:000000000000:secret:sample-global-secrets-AbCdEf
+  variables:
+    PORT: 8080
+    DEBUG: false
+    API_TOKEN: ${environment.refs.appSecrets.API_TOKEN}
+    DATABASE_URL: ${environment.refs.appSecrets.DATABASE_URL}
+    MISSING_ONE: ${environment.refs.appSecrets.NOT_IN_ENV}
+    GLOBAL_KEY: ${environment.refs.globalSecrets.GLOBAL_KEY}
+    WITH_DEFAULT: ${environment.refs.globalSecrets.ABSENT_KEY, 'fallback'}
+custom:
+  dev:
+    cpu: 512
+    memoryLimitMiB: 1800
+stacks:
+  HTTPApi:
+    - name: sample-web
+      dockerfile: Dockerfile
+      appPort: 8080
+      healthCheckPath: /healthz
+      cpu: ${custom.${custom.stage}.cpu}
+      memoryLimitMiB: ${custom.${custom.stage}.memoryLimitMiB}
+      desiredCapacity: 2
+      buildArgs:
+        BUILD_LABEL: from-yaml
+  Fargate:
+    - clusterName: sample-workers-${custom.stage}
+      tasks:
+        - name: sample-worker-a
+          dockerfile: Dockerfile
+          cpu: 256
+          memoryLimitMiB: 512
+        - name: sample-worker-b-with-a-rather-long-task-name
+          dockerfile: Dockerfile
+          appPort: 9000
+          cpu: 3000
+          memoryLimitMiB: 100
+  ScheduledFargate:
+    - tasks:
+        - name: sample-cron
+          handler: jobs/run.py
+          runtime: python3.12
+          schedule: cron(0 3 * * ? *)
+  Lambda:
+    - name: sample-unknown
